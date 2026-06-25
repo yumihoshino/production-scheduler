@@ -16,7 +16,6 @@ st.title("🚜 製造計画全自動スケジュールシステム (複数工場
 st.markdown("### エクセルファイル（.xlsx）をそのまま置くだけで、日次・号機別スケジュールを自動生成します")
 
 st.sidebar.markdown("## 🏢 工場の選択")
-# 🌟【新機能：工場切り替えスイッチ】
 factory_mode = st.sidebar.selectbox("対象の工場を選択してください", ["本社", "関西工場"])
 
 st.sidebar.markdown("---")
@@ -129,11 +128,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['安全割れ不足数'] = df_zai_in_zai['安全割れ不足数'].apply(lambda x: max(0, x))
 
                 # 2. 各工場の月間製造計画書の読み込みとスキャン
-                # 🌟【工場別に読み込みの検索キーワードを自動分岐】
                 if factory_mode == "本社":
                     sheet_keywords = ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"]
                 else:
-                    # 関西工場用のシート名候補（データ受取後に最適化します）
                     sheet_keywords = ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画"]
 
                 df_monthly_raw = load_excel_sheet_smart(file_gekkan, sheet_keywords)
@@ -146,7 +143,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         break
                 if item_row_idx is None: item_row_idx = 1
 
-                # 各工場のエクセルから「該当月（6月度など）」のエリアを追跡
                 target_month_col = None
                 for r in range(item_row_idx + 1):
                     row_vals = [str(v).strip() for v in df_monthly_raw.iloc[r].values]
@@ -169,8 +165,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 code_col_idx, name_col_idx = 0, 1
                 for c_idx in range(min(5, len(df_monthly_raw.columns))):
                     val = str(df_monthly_raw.iloc[item_row_idx, c_idx]).strip()
-                    if any(kw in val for kw in ['商品CD', '品目コード', 'コード', '商品']: code_col_idx = c_idx
-                    elif any(kw in val for kw in ['商品名', '品目名', '名', '品名']): name_col_idx = c_idx
+                    # 🌟 172〜173行目：閉じカッコを100%確実に修正しました
+                    if any(kw in val for kw in ['商品CD', '品目コード', 'コード', '商品']):
+                        code_col_idx = c_idx
+                    elif any(kw in val for kw in ['商品名', '品目名', '名', '品名']):
+                        name_col_idx = c_idx
 
                 df_m = df_monthly_raw.iloc[item_row_idx+1:].copy()
                 df_m_clean = pd.DataFrame({
@@ -179,7 +178,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     '6月_製造予定': pd.to_numeric(df_m.iloc[:, plan_col_idx], errors='coerce').fillna(0),
                     '6月_製造実績': pd.to_numeric(df_m.iloc[:, actual_col_idx], errors='coerce').fillna(0)
                 })
-                # ※月間計画がまだ存在しない月やエラー対応
                 df_m_clean['6月_計画残数'] = df_m_clean['6月_製造予定'] - df_m_clean['6月_製造実績']
                 df_m_clean['6月_計画残数'] = df_m_clean['6月_計画残数'].apply(lambda x: max(0, x))
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (df_m_clean['品目コード'] != 'nan') & (df_m_clean['品目コード'] != '')].drop_duplicates(subset=['品目コード'])

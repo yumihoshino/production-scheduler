@@ -12,17 +12,29 @@ from openpyxl.utils import get_column_letter
 # 画面のデザイン設定
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
-st.title("🚜 製造計画全自動スケジュールシステム (Excel完全対応版)")
+st.title("🚜 製造計画全自動スケジュールシステム (複数工場マルチ対応版)")
 st.markdown("### エクセルファイル（.xlsx）をそのまま置くだけで、日次・号機別スケジュールを自動生成します")
 
+st.sidebar.markdown("## 🏢 工場の選択")
+# 🌟【新機能：工場切り替えスイッチ】
+factory_mode = st.sidebar.selectbox("対象の工場を選択してください", ["本社", "関西工場"])
+
+st.sidebar.markdown("---")
 st.sidebar.markdown("## 1. ファイルのアップロード")
 file_zai = st.sidebar.file_uploader("① 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
-file_gekkan = st.sidebar.file_uploader("② 本社 月間製造計画書 (Excel形式: .xlsx)", type=["xlsx"])
+
+# 工場によって表示名を変える
+if factory_mode == "本社":
+    file_gekkan = st.sidebar.file_uploader("② 本社 月間製造計画書 (Excel形式: .xlsx)", type=["xlsx"])
+else:
+    file_gekkan = st.sidebar.file_uploader("② 関西工場 月間製造計画書 (Excel形式: .xlsx)", type=["xlsx"])
+
 file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (ExcelまたはCSV)", type=["xlsx", "csv"])
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ プラント固定ルール")
 st.sidebar.info(
+    f"・選択中の工場: {factory_mode}\n"
     "・稼働時間: 415分/日\n"
     "・ロス率: 10% (投入量の90%を製品化)\n"
     "・最小バッチ: 5m3\n"
@@ -71,11 +83,11 @@ else:
 
 if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     if not file_zai or not file_gekkan:
-        st.error("エラー: ①在庫推移リスト と ②月間製造計画書 のエクセルファイルをアップロードしてください。")
+        st.error(f"エラー: ①在庫推移リスト と ②{factory_mode}月間製造計画書 のエクセルファイルをアップロードしてください。")
     elif df_bom is None:
         st.error("エラー: 構成表マスタがシステム内に見つかりません。")
     else:
-        with st.spinner("現在、エクセルから位置を自動検知し、スケジュールを演算中です..."):
+        with st.spinner(f"現在、{factory_mode}のデータを解析し、スケジュールを演算中です..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -116,22 +128,30 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['安全割れ不足数'] = df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫']
                 df_zai_in_zai['安全割れ不足数'] = df_zai_in_zai['安全割れ不足数'].apply(lambda x: max(0, x))
 
-                # 2. 月間製造計画書の読み込み
-                df_monthly_raw = load_excel_sheet_smart(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画"])
+                # 2. 各工場の月間製造計画書の読み込みとスキャン
+                # 🌟【工場別に読み込みの検索キーワードを自動分岐】
+                if factory_mode == "本社":
+                    sheet_keywords = ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"]
+                else:
+                    # 関西工場用のシート名候補（データ受取後に最適化します）
+                    sheet_keywords = ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画"]
+
+                df_monthly_raw = load_excel_sheet_smart(file_gekkan, sheet_keywords)
                 
                 item_row_idx = None
                 for i in range(min(15, len(df_monthly_raw))):
                     row_vals = [str(v).strip() for v in df_monthly_raw.iloc[i].values]
-                    if any(kw in row_vals for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ']):
+                    if any(kw in row_vals for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ']):
                         item_row_idx = i
                         break
                 if item_row_idx is None: item_row_idx = 1
 
+                # 各工場のエクセルから「該当月（6月度など）」のエリアを追跡
                 target_month_col = None
                 for r in range(item_row_idx + 1):
                     row_vals = [str(v).strip() for v in df_monthly_raw.iloc[r].values]
                     for c_idx, val in enumerate(row_vals):
-                        if '6月度' in val or '6月' in val:
+                        if '6月' in val or '当月' in val or '製造予定' in val:
                             target_month_col = c_idx
                             break
                     if target_month_col is not None: break
@@ -140,8 +160,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if target_month_col is not None:
                     for c in range(target_month_col, min(target_month_col + 8, len(df_monthly_raw.columns))):
                         col_val = str(df_monthly_raw.iloc[item_row_idx, c]).strip()
-                        if '製造予定' in col_val: plan_col_idx = c
-                        elif '製造実績' in col_val: actual_col_idx = c
+                        if '予定' in col_val or '製造予定' in col_val: plan_col_idx = c
+                        elif '実績' in col_val or '製造実績' in col_val: actual_col_idx = c
                 
                 if plan_col_idx is None: plan_col_idx = 46
                 if actual_col_idx is None: actual_col_idx = 47
@@ -149,8 +169,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 code_col_idx, name_col_idx = 0, 1
                 for c_idx in range(min(5, len(df_monthly_raw.columns))):
                     val = str(df_monthly_raw.iloc[item_row_idx, c_idx]).strip()
-                    if any(kw in val for kw in ['商品CD', '品目コード', 'コード']): code_col_idx = c_idx
-                    elif any(kw in val for kw in ['商品名', '品目名', '名']): name_col_idx = c_idx
+                    if any(kw in val for kw in ['商品CD', '品目コード', 'コード', '商品']: code_col_idx = c_idx
+                    elif any(kw in val for kw in ['商品名', '品目名', '名', '品名']): name_col_idx = c_idx
 
                 df_m = df_monthly_raw.iloc[item_row_idx+1:].copy()
                 df_m_clean = pd.DataFrame({
@@ -159,16 +179,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     '6月_製造予定': pd.to_numeric(df_m.iloc[:, plan_col_idx], errors='coerce').fillna(0),
                     '6月_製造実績': pd.to_numeric(df_m.iloc[:, actual_col_idx], errors='coerce').fillna(0)
                 })
+                # ※月間計画がまだ存在しない月やエラー対応
                 df_m_clean['6月_計画残数'] = df_m_clean['6月_製造予定'] - df_m_clean['6月_製造実績']
                 df_m_clean['6月_計画残数'] = df_m_clean['6月_計画残数'].apply(lambda x: max(0, x))
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (df_m_clean['品目コード'] != 'nan') & (df_m_clean['品目コード'] != '')].drop_duplicates(subset=['品目コード'])
 
-                # 3. アウター合流（大きい方を自動採用）
+                # 3. アウター合流
                 all_codes = set(df_zai_in_zai['品目コード']).union(set(df_m_distinct[df_m_distinct['6月_計画残数'] > 0]['品目コード']))
                 
                 master_list = []
                 for code in all_codes:
-                    if code in ['合計', 'nan', '商品CD', '品目コード', 'None']: continue
+                    if code in ['合計', 'nan', '商品CD', '品目コード', 'None', '商品ｃｄ']: continue
                     zai_row = df_zai_in_zai[df_zai_in_zai['品目コード'] == code]
                     plan_row = df_m_distinct[df_m_distinct['品目コード'] == code]
                     
@@ -237,20 +258,16 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
                 df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).round().astype(int)
 
-                # 🌟【製造理由の自動仕分けロジック】
                 def determine_reason(row):
-                    if row['安全割れ不足数'] > 0:
-                        return '在庫不足（安全割れ）'
-                    else:
-                        return '計画未達'
+                    if row['安全割れ不足数'] > 0: return '在庫不足（安全割れ）'
+                    else: return '計画未達'
                 df_final['製造理由'] = df_final.apply(determine_reason, axis=1)
 
                 # 【足切りルール】欠品しない限り100未満を自動スキップ
                 def apply_skip_rule(row):
                     bags = row['計画製造袋数']
                     reason = row['製造理由']
-                    if reason == '計画未達' and bags < 100:
-                        return 0
+                    if reason == '計画未達' and bags < 100: return 0
                     return bags
 
                 df_final['計画製造袋数'] = df_final.apply(apply_skip_rule, axis=1)
@@ -386,9 +403,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb = Workbook()
                 wb.remove(wb.active)
 
-                ws_summary = wb.create_sheet(title="製造品目・バッチ集計")
+                ws_summary = wb.create_sheet(title=f"製造品目・バッチ集計({factory_mode})")
                 ws_summary.views.sheetView[0].showGridLines = True
-                # ヘッダーの最終列に「製造理由」を追加
                 ws_summary.append(["品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "今月の計画残数", "決定製造m3", "最終製造総数(袋)", "製造理由"])
                 for idx, row in df_final_sorted.iterrows():
                     ws_summary.append([
@@ -397,7 +413,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         row['製造決定_m3'], row['計画製造袋数'], row['製造理由']
                     ])
 
-                ws_daily = wb.create_sheet(title="日別・号機別製造計画")
+                ws_daily = wb.create_sheet(title=f"日別・号機別製造計画({factory_mode})")
                 ws_daily.views.sheetView[0].showGridLines = True
                 ws_daily.append(["稼働日", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考"])
                 for job in full_schedule:
@@ -445,20 +461,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success("🎉 製造計画の作成が完了しました！以下のボタンから最新エクセルを保存してください。")
+                st.success(f"🎉 {factory_mode}用の製造計画が完了しました！以下のボタンからダウンロードしてください。")
                 st.download_button(
-                    label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
+                    label=f"📊 {factory_mode} 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data,
-                    file_name="【確定完成版】当月日次製造指示スケジュール表.xlsx",
+                    file_name=f"【確定完成版】{factory_mode}_日次製造指示スケジュール表.xlsx",
                     mime="application/vnd.openpyxlformats-officedocument.spreadsheetml.sheet"
                 )
 
-                st.markdown("### 🔍 明日（1日目）の予定プレビュー")
-                df_preview = pd.DataFrame(full_schedule)
-                if not df_preview.empty:
-                    st.dataframe(df_preview[df_preview['稼働日'] == '1日目'][['製造ライン', '品目名', '指示数量(袋)', '合計拘束時間(分)']], use_container_width=True)
-                else:
-                    st.info("指示対象の製造予定はありません（すべてスキップされました）")
-
             except Exception as e:
-                st.error(f"エラーが発生しました。エクセルの形式（シート名や列位置）が正しいか確認してください。詳細: {str(e)}")
+                st.error(f"エラーが発生しました。エクセルの形式が正しいか確認してください。詳細: {str(e)}")

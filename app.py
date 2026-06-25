@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import math
 import re
 import io
@@ -75,7 +76,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     else:
         with st.spinner("現在、エクセルから位置を自動検知し、スケジュールを演算中です..."):
             try:
-                # 1. 在庫推移リストの読み込みと見に見えない位置ズレ自動検知
+                # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
                 
                 header_idx = None
@@ -91,7 +92,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 raw_headers = [str(h).strip() for h in df_zai_raw.iloc[header_idx].values]
                 
-                # 表の見出しをシステムが認識できる標準名に強制翻訳（KeyError対策）
                 standard_headers = []
                 for h in raw_headers:
                     if h in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD']: standard_headers.append('品目コード')
@@ -115,7 +115,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['安全割れ不足数'] = df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫']
                 df_zai_in_zai['安全割れ不足数'] = df_zai_in_zai['安全割れ不足数'].apply(lambda x: max(0, x))
 
-                # 2. 月間製造計画書の読み込み（列と6月度の自動追跡スキャン）
+                # 2. 月間製造計画書の読み込み
                 df_monthly_raw = load_excel_sheet_smart(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画"])
                 
                 item_row_idx = None
@@ -126,7 +126,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         break
                 if item_row_idx is None: item_row_idx = 1
 
-                # 6月度エリアを自動スキャン
                 target_month_col = None
                 for r in range(item_row_idx + 1):
                     row_vals = [str(v).strip() for v in df_monthly_raw.iloc[r].values]
@@ -136,7 +135,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             break
                     if target_month_col is not None: break
                 
-                # 予定・実績の列を自動追跡
                 plan_col_idx, actual_col_idx = None, None
                 if target_month_col is not None:
                     for c in range(target_month_col, min(target_month_col + 8, len(df_monthly_raw.columns))):
@@ -147,7 +145,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if plan_col_idx is None: plan_col_idx = 46
                 if actual_col_idx is None: actual_col_idx = 47
 
-                # 商品コード・名前の列を追跡
                 code_col_idx, name_col_idx = 0, 1
                 for c_idx in range(min(5, len(df_monthly_raw.columns))):
                     val = str(df_monthly_raw.iloc[item_row_idx, c_idx]).strip()
@@ -199,7 +196,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_master_combined['容量_L'] = df_master_combined['品目名'].apply(get_volume)
                 df_master_combined['ベース必要容量_L'] = df_master_combined['採用ベース数量'] * df_master_combined['容量_L']
 
-                # 5. マスタ列の自動翻訳
+                # 5. マスタ列の自動認識
                 df_bom.columns = [str(c).strip() for c in df_bom.columns]
                 parent_col, child_col = None, None
                 for c in df_bom.columns:

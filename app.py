@@ -13,7 +13,7 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
 st.title("🚜 製造計画全自動スケジュールシステム (Excel完全対応版)")
-st.markdown("### エクセルファイル（.xlsx）をそのまま置くだけで、日次・号機別のスケジュールを自動生成します")
+st.markdown("### エクセルファイル（.xlsx）をそのまま置くだけで、日次・号機別スケジュールを自動生成します")
 
 st.sidebar.markdown("## 1. ファイルのアップロード")
 file_zai = st.sidebar.file_uploader("① 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
@@ -27,7 +27,8 @@ st.sidebar.info(
     "・ロス率: 10% (投入量の90%を製品化)\n"
     "・最小バッチ: 5m3\n"
     "・基本バッチ: 10m3 (端数時は1バッチ追加)\n"
-    "・同配合大→小連続製造: 切り替え5分に短縮"
+    "・同配合大→小連続製造: 切り替え5分に短縮\n"
+    "・足切りルール: 欠品時を除き100袋未満はスキップ"
 )
 
 # 複数シートから目的のシートを自動検知して読み込む関数
@@ -227,7 +228,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 grouped['製造決定_m3'] = grouped['純計算_m3_ロス込'].apply(apply_final_batch_rule)
 
-                # 7. 最終指示袋数の確定 (製品化容量 = 決定バッチ × 0.9)
+                # 7. 最終指示袋数の確定
                 df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3']], on='中身設計コード', how='left')
                 total_volume_by_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
                 df_final['分配比率'] = df_final['ベース必要容量_L'] / total_volume_by_recipe
@@ -235,6 +236,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
                 df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).round().astype(int)
+
+                # 🌟【製造理由の自動仕分けロジック】
+                def determine_reason(row):
+                    if row['安全割れ不足数'] > 0:
+                        return '在庫不足（安全割れ）'
+                    else:
+                        return '計画未達'
+                df_final['製造理由'] = df_final.apply(determine_reason, axis=1)
+
+                # 【足切りルール】欠品しない限り100未満を自動スキップ
+                def apply_skip_rule(row):
+                    bags = row['計画製造袋数']
+                    reason = row['製造理由']
+                    if reason == '計画未達' and bags < 100:
+                        return 0
+                    return bags
+
+                df_final['計画製造袋数'] = df_final.apply(apply_skip_rule, axis=1)
 
                 # 8. 製造ライン判定
                 def get_tf_flag(name):
@@ -369,12 +388,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 ws_summary = wb.create_sheet(title="製造品目・バッチ集計")
                 ws_summary.views.sheetView[0].showGridLines = True
-                ws_summary.append(["品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "今月の計画残数", "決定製造m3", "最終製造総数(袋)"])
+                # ヘッダーの最終列に「製造理由」を追加
+                ws_summary.append(["品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "今月の計画残数", "決定製造m3", "最終製造総数(袋)", "製造理由"])
                 for idx, row in df_final_sorted.iterrows():
                     ws_summary.append([
                         row['品目コード'], row['品目名'], row['製造ライン'], row['中身設計コード'],
                         row['現在の在庫'], row['安全在庫数'], row['安全割れ不足数'], row['今月の計画残数'],
-                        row['製造決定_m3'], row['計画製造袋数']
+                        row['製造決定_m3'], row['計画製造袋数'], row['製造理由']
                     ])
 
                 ws_daily = wb.create_sheet(title="日別・号機別製造計画")
@@ -435,7 +455,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 st.markdown("### 🔍 明日（1日目）の予定プレビュー")
                 df_preview = pd.DataFrame(full_schedule)
-                st.dataframe(df_preview[df_preview['稼働日'] == '1日目'][['製造ライン', '品目名', '指示数量(袋)', '合計拘束時間(分)']], use_container_width=True)
+                if not df_preview.empty:
+                    st.dataframe(df_preview[df_preview['稼働日'] == '1日目'][['製造ライン', '品目名', '指示数量(袋)', '合計拘束時間(分)']], use_container_width=True)
+                else:
+                    st.info("指示対象の製造予定はありません（すべてスキップされました）")
 
             except Exception as e:
                 st.error(f"エラーが発生しました。エクセルの形式（シート名や列位置）が正しいか確認してください。詳細: {str(e)}")

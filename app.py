@@ -30,45 +30,38 @@ st.sidebar.info(
 )
 
 # 複数シートから目的のシートを自動検知して読み込む関数
-def load_excel_sheet(file, possible_sheet_names):
+def load_excel_sheet_smart(file, keywords):
     xl = pd.ExcelFile(file)
-    target_sheet = xl.sheet_names[0] # 見つからない場合は最初のシート
-    for name in possible_sheet_names:
-        if name in xl.sheet_names:
-            target_sheet = name
+    target_sheet = xl.sheet_names[0]
+    for sheet in xl.sheet_names:
+        if any(kw in sheet for kw in keywords):
+            target_sheet = sheet
             break
     return pd.read_excel(xl, sheet_name=target_sheet, header=None)
 
 # 2. 構成表マスタ（BOM）の保持・永続化ロジック
 df_bom = None
 if file_bom is not None:
-    # ユーザーが画面から新しいマスタをアップロードした場合（文字コードエラー対策）
     if file_bom.name.endswith('.csv'):
         try:
-            # まず通常のUTF-8で試す
             df_bom = pd.read_csv(file_bom, encoding='utf-8')
         except UnicodeDecodeError:
-            # エラーが出たらShift-JIS(cp932)で読み直す
             file_bom.seek(0)
             df_bom = pd.read_csv(file_bom, encoding='cp932')
     else:
-        df_bom = load_excel_sheet(file_bom, ["マスタ", "BOM", "BomMaster"])
+        df_bom = load_excel_sheet_smart(file_bom, ["マスタ", "BOM", "BomMaster"])
     st.session_state['bom_data'] = df_bom
     st.sidebar.success("新しいマスタを一時読込しました")
 elif os.path.exists("bom_master.xlsx"):
-    # GitHubに事前配置されたエクセルマスタを自動読込（本命ルート）
     df_bom = pd.read_excel("bom_master.xlsx")
 elif os.path.exists("bom_master.csv"):
-    # GitHubに事前配置されたCSVマスタを自動読込
     try:
         df_bom = pd.read_csv("bom_master.csv", encoding='utf-8')
     except UnicodeDecodeError:
         df_bom = pd.read_csv("bom_master.csv", encoding='cp932')
 elif 'bom_data' in st.session_state:
-    # 同一セッション内で保持されているデータを使用
     df_bom = st.session_state['bom_data']
 
-# マスタの読み込み状態をサイドバーに表示
 if df_bom is not None:
     st.sidebar.success("🟢 構成表マスタ: 読込済み (入力不要)")
 else:
@@ -80,13 +73,35 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタがシステム内に見つかりません。")
     else:
-        with st.spinner("現在、エクセルからデータを抽出し、日次スケジュールを演算中です..."):
+        with st.spinner("現在、エクセルから位置を自動検知し、スケジュールを演算中です..."):
             try:
-                # 1. 在庫推移リストの読み込み（エクセル自動判定）
-                df_zai_raw = load_excel_sheet(file_zai, ["在庫推移リスト", "在庫推移"])
-                headers = df_zai_raw.iloc[2].values
-                df_zai_fixed = df_zai_raw.iloc[3:].copy()
-                df_zai_fixed.columns = headers
+                # 1. 在庫推移リストの読み込みと見に見えない位置ズレ自動検知
+                df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
+                
+                header_idx = None
+                for i in range(len(df_zai_raw)):
+                    row_vals = [str(v).strip() for v in df_zai_raw.iloc[i].values]
+                    if any(kw in row_vals for kw in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD']):
+                        header_idx = i
+                        break
+                
+                if header_idx is None:
+                    st.error("エラー: ①のファイル内に『品目コード』という見出し列が見つかりません。シート構成を確認してください。")
+                    st.stop()
+
+                raw_headers = [str(h).strip() for h in df_zai_raw.iloc[header_idx].values]
+                
+                # 表の見出しをシステムが認識できる標準名に強制翻訳（KeyError対策）
+                standard_headers = []
+                for h in raw_headers:
+                    if h in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD']: standard_headers.append('品目コード')
+                    elif h in ['品目名', '商品名']: standard_headers.append('品目名')
+                    elif h in ['安全在庫数', '安全在庫']: standard_headers.append('安全在庫数')
+                    elif h in ['種類', '区分']: standard_headers.append('種類')
+                    else: standard_headers.append(h)
+
+                df_zai_fixed = df_zai_raw.iloc[header_idx+1:].copy()
+                df_zai_fixed.columns = standard_headers
 
                 df_zai_fixed['品目コード'] = df_zai_fixed['品目コード'].ffill().astype(str).str.strip()
                 df_zai_fixed['品目名'] = df_zai_fixed['品目名'].ffill().astype(str).str.strip()
@@ -100,25 +115,62 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['安全割れ不足数'] = df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫']
                 df_zai_in_zai['安全割れ不足数'] = df_zai_in_zai['安全割れ不足数'].apply(lambda x: max(0, x))
 
-                # 2. 月間製造計画書の読み込み（エクセル自動判定）
-                df_monthly_raw = load_excel_sheet(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画"])
-                df_m = df_monthly_raw.iloc[2:].copy()
+                # 2. 月間製造計画書の読み込み（列と6月度の自動追跡スキャン）
+                df_monthly_raw = load_excel_sheet_smart(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画"])
+                
+                item_row_idx = None
+                for i in range(min(15, len(df_monthly_raw))):
+                    row_vals = [str(v).strip() for v in df_monthly_raw.iloc[i].values]
+                    if any(kw in row_vals for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ']):
+                        item_row_idx = i
+                        break
+                if item_row_idx is None: item_row_idx = 1
+
+                # 6月度エリアを自動スキャン
+                target_month_col = None
+                for r in range(item_row_idx + 1):
+                    row_vals = [str(v).strip() for v in df_monthly_raw.iloc[r].values]
+                    for c_idx, val in enumerate(row_vals):
+                        if '6月度' in val or '6月' in val:
+                            target_month_col = c_idx
+                            break
+                    if target_month_col is not None: break
+                
+                # 予定・実績の列を自動追跡
+                plan_col_idx, actual_col_idx = None, None
+                if target_month_col is not None:
+                    for c in range(target_month_col, min(target_month_col + 8, len(df_monthly_raw.columns))):
+                        col_val = str(df_monthly_raw.iloc[item_row_idx, c]).strip()
+                        if '製造予定' in col_val: plan_col_idx = c
+                        elif '製造実績' in col_val: actual_col_idx = c
+                
+                if plan_col_idx is None: plan_col_idx = 46
+                if actual_col_idx is None: actual_col_idx = 47
+
+                # 商品コード・名前の列を追跡
+                code_col_idx, name_col_idx = 0, 1
+                for c_idx in range(min(5, len(df_monthly_raw.columns))):
+                    val = str(df_monthly_raw.iloc[item_row_idx, c_idx]).strip()
+                    if any(kw in val for kw in ['商品CD', '品目コード', 'コード']): code_col_idx = c_idx
+                    elif any(kw in val for kw in ['商品名', '品目名', '名']): name_col_idx = c_idx
+
+                df_m = df_monthly_raw.iloc[item_row_idx+1:].copy()
                 df_m_clean = pd.DataFrame({
-                    '品目コード': df_m.iloc[:, 0].astype(str).str.strip(),
-                    '品目名_計画書': df_m.iloc[:, 1].astype(str).str.strip(),
-                    '6月_製造予定': pd.to_numeric(df_m.iloc[:, 46], errors='coerce').fillna(0),
-                    '6月_製造実績': pd.to_numeric(df_m.iloc[:, 47], errors='coerce').fillna(0)
+                    '品目コード': df_m.iloc[:, code_col_idx].astype(str).str.strip(),
+                    '品目名_計画書': df_m.iloc[:, name_col_idx].astype(str).str.strip(),
+                    '6月_製造予定': pd.to_numeric(df_m.iloc[:, plan_col_idx], errors='coerce').fillna(0),
+                    '6月_製造実績': pd.to_numeric(df_m.iloc[:, actual_col_idx], errors='coerce').fillna(0)
                 })
                 df_m_clean['6月_計画残数'] = df_m_clean['6月_製造予定'] - df_m_clean['6月_製造実績']
                 df_m_clean['6月_計画残数'] = df_m_clean['6月_計画残数'].apply(lambda x: max(0, x))
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (df_m_clean['品目コード'] != 'nan') & (df_m_clean['品目コード'] != '')].drop_duplicates(subset=['品目コード'])
 
-                # 3. データの結合（安全在庫割れと計画残数の大きい方を自動採用）
+                # 3. アウター合流（大きい方を自動採用）
                 all_codes = set(df_zai_in_zai['品目コード']).union(set(df_m_distinct[df_m_distinct['6月_計画残数'] > 0]['品目コード']))
                 
                 master_list = []
                 for code in all_codes:
-                    if code in ['合計', 'nan', '商品CD']: continue
+                    if code in ['合計', 'nan', '商品CD', '品目コード', 'None']: continue
                     zai_row = df_zai_in_zai[df_zai_in_zai['品目コード'] == code]
                     plan_row = df_m_distinct[df_m_distinct['品目コード'] == code]
                     
@@ -147,10 +199,15 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_master_combined['容量_L'] = df_master_combined['品目名'].apply(get_volume)
                 df_master_combined['ベース必要容量_L'] = df_master_combined['採用ベース数量'] * df_master_combined['容量_L']
 
-                # 5. マスタの列名を標準化して配合（BHコード）を特定
+                # 5. マスタ列の自動翻訳
                 df_bom.columns = [str(c).strip() for c in df_bom.columns]
-                parent_col = "商品CODE" if "商品CODE" in df_bom.columns else (df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
-                child_col = "配合CODE" if "配合CODE" in df_bom.columns else df_bom.columns[0]
+                parent_col, child_col = None, None
+                for c in df_bom.columns:
+                    if c in ['商品CODE', '商品コード', '親品目コード', '親品目']: parent_col = c
+                    elif c in ['配合CODE', '配合コード', '子品目コード', '子品目']: child_col = c
+                
+                if parent_col is None: parent_col = df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0]
+                if child_col is None: child_col = df_bom.columns[0]
                 
                 def extract_content_code(item_code):
                     sub_bom = df_bom[df_bom[parent_col].astype(str).str.strip() == item_code]
@@ -161,9 +218,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
-                # 6. 【製品化容量 ＝ 投入配合量 × 0.9】のバッチ計算
+                # 6. バッチ計算 (投入量に対して90%製品化)
                 grouped = df_master_combined.groupby('中身設計コード').agg({'ベース必要容量_L': 'sum'}).reset_index()
-                # ロス10%を考慮した「必要な総投入量(m3)」を逆算
                 grouped['純計算_m3_ロス込'] = (grouped['ベース必要容量_L'] / 0.9) / 1000
 
                 def apply_final_batch_rule(m3):
@@ -174,13 +230,12 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 grouped['製造決定_m3'] = grouped['純計算_m3_ロス込'].apply(apply_final_batch_rule)
 
-                # 7. 最終指示袋数の確定（決定m3から、実際に得られる10%ロス後の製品量を計算）
+                # 7. 最終指示袋数の確定 (製品化容量 = 決定バッチ × 0.9)
                 df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3']], on='中身設計コード', how='left')
                 total_volume_by_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
                 df_final['分配比率'] = df_final['ベース必要容量_L'] / total_volume_by_recipe
                 df_final['分配比率'] = df_final['分配比率'].fillna(1.0)
 
-                # 製品化容量 ＝ 決定バッチ容積 × 0.9
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
                 df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).round().astype(int)
 

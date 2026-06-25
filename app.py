@@ -12,12 +12,12 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
 st.title("🚜 製造計画全自動スケジュールシステム (Excel完全対応版)")
-st.markdown("### エクセルファイル（.xlsx）をそのまま置くだけで、日次の号機別スケジュールを自動生成します")
+st.markdown("### エクセルファイル（.xlsx）をそのまま置くだけで、日次・号機別のスケジュールを自動生成します")
 
 st.sidebar.markdown("## 1. ファイルのアップロード")
 file_zai = st.sidebar.file_uploader("① 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
 file_gekkan = st.sidebar.file_uploader("② 本社 月間製造計画書 (Excel形式: .xlsx)", type=["xlsx"])
-file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (Excel/CSV形式)", type=["xlsx", "csv"])
+file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (ExcelまたはCSV)", type=["xlsx", "csv"])
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ プラント固定ルール")
@@ -42,9 +42,15 @@ def load_excel_sheet(file, possible_sheet_names):
 # 2. 構成表マスタ（BOM）の保持・永続化ロジック
 df_bom = None
 if file_bom is not None:
-    # ユーザーが画面から新しいマスタをアップロードした場合（上書き）
+    # ユーザーが画面から新しいマスタをアップロードした場合（文字コードエラー対策）
     if file_bom.name.endswith('.csv'):
-        df_bom = pd.read_csv(file_bom)
+        try:
+            # まず通常のUTF-8で試す
+            df_bom = pd.read_csv(file_bom, encoding='utf-8')
+        except UnicodeDecodeError:
+            # エラーが出たらShift-JIS(cp932)で読み直す
+            file_bom.seek(0)
+            df_bom = pd.read_csv(file_bom, encoding='cp932')
     else:
         df_bom = load_excel_sheet(file_bom, ["マスタ", "BOM", "BomMaster"])
     st.session_state['bom_data'] = df_bom
@@ -54,7 +60,10 @@ elif os.path.exists("bom_master.xlsx"):
     df_bom = pd.read_excel("bom_master.xlsx")
 elif os.path.exists("bom_master.csv"):
     # GitHubに事前配置されたCSVマスタを自動読込
-    pd.read_csv("bom_master.csv")
+    try:
+        df_bom = pd.read_csv("bom_master.csv", encoding='utf-8')
+    except UnicodeDecodeError:
+        df_bom = pd.read_csv("bom_master.csv", encoding='cp932')
 elif 'bom_data' in st.session_state:
     # 同一セッション内で保持されているデータを使用
     df_bom = st.session_state['bom_data']
@@ -140,7 +149,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 # 5. マスタの列名を標準化して配合（BHコード）を特定
                 df_bom.columns = [str(c).strip() for c in df_bom.columns]
-                parent_col = "商品CODE" if "商品CODE" in df_bom.columns else df_bom.columns[2]
+                parent_col = "商品CODE" if "商品CODE" in df_bom.columns else (df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
                 child_col = "配合CODE" if "配合CODE" in df_bom.columns else df_bom.columns[0]
                 
                 def extract_content_code(item_code):
@@ -152,7 +161,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
-                # 6. 【修正：製品化容量 ＝ 投入配合量 × 0.9】のバッチ計算
+                # 6. 【製品化容量 ＝ 投入配合量 × 0.9】のバッチ計算
                 grouped = df_master_combined.groupby('中身設計コード').agg({'ベース必要容量_L': 'sum'}).reset_index()
                 # ロス10%を考慮した「必要な総投入量(m3)」を逆算
                 grouped['純計算_m3_ロス込'] = (grouped['ベース必要容量_L'] / 0.9) / 1000
@@ -184,7 +193,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     code = row['品目コード']
                     name = row['品目名']
                     vol = row['容量_L']
-                    is_tf = row['堆肥・腐煙土フラグ'] if '堆肥・腐煙土フラグ' in row else row['堆肥・腐葉土フラグ']
+                    is_tf = row['堆肥・腐葉土フラグ']
                     if code == 'H0620030' or '再生材' in name or 'もう一土元気' in name: return '3号機'
                     if is_tf: return '3号機'
                     if vol <= 12: return '5号機'

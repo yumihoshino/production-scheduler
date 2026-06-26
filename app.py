@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit st
 import pandas as pd
 import numpy as np
 import math
@@ -110,7 +110,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner("現在、タイムテーブルの表示ズレバグを完全に修正してパズルを再構築中です..."):
+        with st.spinner("現在、すべての現場ルールを同期させて精密パズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -215,6 +215,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 parent_col = "商品CODE" if "商品CODE" in df_bom.columns else (df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
                 child_col = "配合CODE" if "配合CODE" in df_bom.columns else df_bom.columns[0]
                 
+                # 🌟【完全修復：消えていた関数定義ブロックを100%確実にここに再配置しました】
+                def extract_content_code(item_code):
+                    sub_bom = df_bom[df_bom[parent_col].astype(str).str.strip() == item_code]
+                    if sub_bom.empty: return item_code
+                    bh_items = sub_bom[sub_bom[child_col].astype(str).str.startswith('BH')]
+                    return bh_items[child_col].iloc[0] if not bh_items.empty else sub_bom[child_col].iloc[0]
+
                 df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
                 # 6. バッチ・指示数確定
@@ -228,6 +235,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
                 df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).round().astype(int)
 
+                # 製造理由の判定
                 def determine_reason_advanced(row_item):
                     curr = row_item['現在の在庫']
                     if not pd.isna(curr) and curr < 0: return '現在庫がマイナス'
@@ -282,7 +290,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if required_daily_mins > 430.0:
                     overtime_mins = math.ceil(required_daily_mins - 430.0)
                     daily_capacity = 430.0 + overtime_mins
-                    if daily_capacity > 640.0: daily_capacity = 640.0; overtime_mins = 210
+                    if daily_capacity > 640.0: 
+                        daily_capacity = 640.0; overtime_mins = 210
                 else:
                     daily_capacity = 430.0
 
@@ -304,7 +313,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 while True:
                     active_lines = []
-                    for l in ['5号機', '2号機', '6号機', '3号機']:
+                    for l in ['5号機', '2号機', '6号機', '3号機']: # スピード順スキャン
                         has_work = False
                         if current_job_idx[l] < len(queues[l]) and queues[l][current_job_idx[l]]['remaining_bags'] > 0:
                             has_work = True
@@ -358,7 +367,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 if job['remaining_bags'] <= max_bags_today:
                                     bags_to_make = job['remaining_bags']
                                     job_duration = bags_to_make / speed_per_min
-                                    # 🌟【重要：タイムテーブル用の「生」のタイムスタンプキーを完全に保持】
                                     t_start = start_time_current
                                     t_end = t_start + job_duration
                                     time_spent += switch_time + job_duration
@@ -367,8 +375,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(bags_to_make),
                                         '開始時間_分': start_time_current, '製造時間(分)': round(job_duration, 1),
                                         '切り替え(分)': round(switch_time, 1), '合計拘束時間(分)': round(switch_time + job_duration, 1), 
-                                        '製造理由': job['製造理由'], '備考': '全量完了',
-                                        't_start': t_start, 't_end': t_end
+                                        '製造理由': job['製造理由'], '備考': '全量完了', 't_start': t_start, 't_end': t_end
                                     })
                                     job['remaining_bags'] = 0; current_job_idx[line] += 1
                                     prev_recipe, prev_vol = job['中身設計コード'], job['容量_L']
@@ -384,8 +391,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(bags_to_make),
                                         '開始時間_分': start_time_current, '製造時間(分)': round(job_duration, 1),
                                         '切り替え(分)': round(switch_time, 1), '合計拘束時間(分)': round(switch_time + job_duration, 1), 
-                                        '製造理由': job['製造理由'], '備考': '翌日へ分割継続',
-                                        't_start': t_start, 't_end': t_end
+                                        '製造理由': job['製造理由'], '備考': '翌日へ分割継続', 't_start': t_start, 't_end': t_end
                                     })
                                     job['remaining_bags'] -= bags_to_make
                                     prev_recipe, prev_vol = job['中身設計コード'], job['容量_L']
@@ -401,7 +407,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         
                                         can_support = False
                                         if line == '5号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: can_support = True
-                                        if line == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラ防']: can_support = True
+                                        if line == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: can_support = True
                                         
                                         if can_support:
                                             switch_time = 10.0
@@ -426,8 +432,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                     '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(bags_to_make),
                                                     '開始時間_分': start_time_current, '製造時間(分)': round(job_duration, 1),
                                                     '切り替え(分)': round(switch_time, 1), '合計拘束時間(分)': round(switch_time + job_duration, 1), 
-                                                    '製造理由': job['製造理由'], '備考': f"★{other_line}の応援製造(全量完了)",
-                                                    't_start': t_start, 't_end': t_end
+                                                    '製造理由': job['製造理由'], '備考': f"★{other_line}の応援製造(全量完了)", 't_start': t_start, 't_end': t_end
                                                 })
                                                 job['remaining_bags'] = 0
                                             else:
@@ -442,8 +447,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                     '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(bags_to_make),
                                                     '開始時間_分': start_time_current, '製造時間(分)': round(job_duration, 1),
                                                     '切り替え(分)': round(switch_time, 1), '合計拘束時間(分)': round(switch_time + job_duration, 1), 
-                                                    '製造理由': job['製造理由'], '備考': f"★{other_line}の応援製造(一部継続)",
-                                                    't_start': t_start, 't_end': t_end
+                                                    '製造理由': job['製造理由'], '備考': f"★{other_line}の応援製造(一部継続)", 't_start': t_start, 't_end': t_end
                                                 })
                                                 job['remaining_bags'] -= bags_to_make
                                             
@@ -459,21 +463,18 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb = Workbook()
                 wb.remove(wb.active)
 
-                # シート①: 集計マスタ
                 ws_summary = wb.create_sheet(title="製造品目・バッチ集計")
                 ws_summary.views.sheetView[0].showGridLines = True
                 ws_summary.append(["品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "今月の計画残数", "決定製造m3", "最終製造総数(袋)", "製造理由"])
                 for idx, row_item in df_final_sorted.iterrows():
                     ws_summary.append([row_item['品目コード'], row_item['品目名'], row_item['製造ライン'], row_item['中身設計コード'], row_item['現在の在庫'], row_item['安全在庫数'], row_item['安全割れ不足数'], row_item['今月の計画残数'], row_item['製造決定_m3'], row_item['計画製造袋数'], row_item['製造理由']])
 
-                # シート②: 日別・号機別製造計画
                 ws_daily = wb.create_sheet(title="日別・号機別製造計画")
                 ws_daily.views.sheetView[0].showGridLines = True
                 ws_daily.append(["稼働日", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
                 for job in full_schedule:
                     ws_daily.append([job['稼働日'], job['製造ライン'], job['配合コード'], job['品目コード'], job['品目名'], job['指示数量(袋)'], job['製造時間(分)'], job['切り替え(分)'], job['合計拘束時間(分)'], job['備考'], job['製造理由']])
 
-                # シート③：ガントタイムテーブル (バグ完全修正版)
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
@@ -511,7 +512,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 for job in full_schedule:
                     d_num = int(job['稼働日'].replace("日目", ""))
                     l_key = job['製造ライン']
-                    # 🌟【重要バグ修正：丸められた数値ではなく、生データを使って完全に一致させます】
                     start_m = job['t_start']
                     end_m = job['t_end']
                     
@@ -524,7 +524,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 s_start, s_end = slot_ranges[s_idx]
                                 if s_idx == 24: s_end = 640.0
                                 if s_start is not None and s_end is not None:
-                                    # 🌟【重要修正：微小な演算誤差(1e-5分)の安全弁を挟み、16:30終了のハミ出しを100%遮断】
                                     if max(start_m, s_start) < min(end_m, s_end) - 1e-5:
                                         prefix = "★(応援)\n" if "応援製造" in str(job.get('備考', '')) else ""
                                         txt = f"{prefix}{job['品目名']}\n({job['指示数量(袋)']}袋)\n"

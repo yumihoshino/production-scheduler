@@ -110,7 +110,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner("現在、3箇所の休憩時間を完全ガードして、20:00までの精密パズルを組み立てています..."):
+        with st.spinner("現在、すべての現場ルールを同期させて精密パズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -149,7 +149,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 item_row_idx = 1
                 for i in range(min(15, len(df_monthly_raw))):
                     row_vals = [str(v).strip() for v in df_monthly_raw.iloc[i].values]
-                    if any(kw in row_vals for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ']):
+                    if any(kw in row_vals for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ']):
                         item_row_idx = i; break
 
                 target_month_col = None
@@ -215,6 +215,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 parent_col = "商品CODE" if "商品CODE" in df_bom.columns else (df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
                 child_col = "配合CODE" if "配合CODE" in df_bom.columns else df_bom.columns[0]
                 
+                # 🌟【復活：消えていた関数定義ブロックを100%確実に再配置しました】
+                def extract_content_code(item_code):
+                    sub_bom = df_bom[df_bom[parent_col].astype(str).str.strip() == item_code]
+                    if sub_bom.empty: return item_code
+                    bh_items = sub_bom[sub_bom[child_col].astype(str).str.startswith('BH')]
+                    return bh_items[child_col].iloc[0] if not bh_items.empty else sub_bom[child_col].iloc[0]
+
                 df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
                 # 6. バッチ・指示数確定
@@ -234,16 +241,16 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 # 8. 製造ラインとスピード判定
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: '腐葉土' in str(n) or '堆肥' in str(n) or '特大袋' in str(n))
-                df_final['製造ライン'] = df_final.apply(lambda row: '3号機' if (row['品目コード'] == 'H0620030' or '再生材' in row['品目名'] or 'もう一土元気' in row['品目名'] or row['堆肥・腐葉土フラグ']) else ('5号機' if row['容量_L'] <= 12 else ('2号機' if 14 <= row['容量_L'] <= 20 else ('6号機' if row['容量_L'] >= 25 else '要確認'))), axis=1)
+                df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
 
-                def calc_duration_mins(row):
-                    if row['計画製造袋数'] <= 0: return 0.0
-                    if row['製造ライン'] == '2号機': speed = 500
-                    elif row['製造ライン'] == '3号機': speed = 300
-                    elif row['製造ライン'] == '5号機': speed = 1000 if row['容量_L'] == 14 else (700 if row['容量_L'] == 25 else 750)
-                    elif row['製造ライン'] == '6号機': speed = 300
+                def calc_duration_mins(row_item):
+                    if row_item['計画製造袋数'] <= 0: return 0.0
+                    if row_item['製造ライン'] == '2号機': speed = 500
+                    elif row_item['製造ライン'] == '3号機': speed = 300
+                    elif row_item['製造ライン'] == '5号機': speed = 1000 if row_item['容量_L'] == 14 else (700 if row_item['容量_L'] == 25 else 750)
+                    elif row_item['製造ライン'] == '6号機': speed = 300
                     else: speed = 400
-                    return (row['計画製造袋数'] / speed) * 60
+                    return (row_item['計画製造袋数'] / speed) * 60
                 df_final['製造所要時間_分'] = df_final.apply(calc_duration_mins, axis=1)
 
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
@@ -272,17 +279,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 required_daily_mins = max_line_mins / target_days
                 
                 overtime_mins = 0
-                if required_daily_mins > 430.0:  # 休憩を除く通常純定時は430分
+                if required_daily_mins > 430.0:
                     overtime_mins = math.ceil(required_daily_mins - 430.0)
                     daily_capacity = 430.0 + overtime_mins
-                    if daily_capacity > 640.0: # 20:00上限
+                    if daily_capacity > 640.0: 
                         daily_capacity = 640.0
                         overtime_mins = 210
                 else:
                     daily_capacity = 430.0
 
                 if overtime_mins > 0:
-                    total_elapsed = daily_capacity + 80 # 全休憩80分加算
+                    total_elapsed = daily_capacity + 80 
                     end_hour = 8 + int(total_elapsed // 60)
                     end_min = int(total_elapsed % 60)
                     st.warning(f"📢 【残業アラート】計画を{target_days}日以内に終わらせるため、毎日 【{overtime_mins}分】の均等残業が必要です！ 稼働時間を一律 【{end_hour}:{end_min:02d}終了】 に平準化して指示書を生成します。")
@@ -312,8 +319,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     elif has_pair_2_6 and not has_pair_3_5: lines_to_run_today = [l for l in ['2号機', '6号機'] if l in active_lines]
                     elif has_pair_3_5 and not has_pair_2_6: lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
                     else:
-                        # 🌟【バグ完全修正：左辺を weight_2_6 に統一し、変数エラーを根絶しました】
-                        weight_2_6 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['2号機', '6機'] if l in active_lines]) if '2号機' in queues or '6号機' in queues else 0
+                        # 🌟【完全修復：前回の重複・不要行を完全にクリーンアップしました】
                         weight_2_6 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['2号機', '6号機'] if l in active_lines])
                         weight_3_5 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['3号機', '5号機'] if l in active_lines])
                         lines_to_run_today = ['2号機', '6号機'] if weight_2_6 >= weight_3_5 else ['3号機', '5号機']
@@ -392,7 +398,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
-                # 時間枠（横軸）
+                # 横軸の時間枠
                 time_slots = [
                     "8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", 
                     "10:00〜10:10(休憩)", "10:10〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", 

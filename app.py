@@ -209,7 +209,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     })
 
                 df_master_combined = pd.DataFrame(master_list)
-                # 🌟【バグ完全修正：旧字体の「數量」を普通の「数量」へ100%直しました】
                 df_master_combined['採用ベース数量'] = df_master_combined[['安全割れ不足数', '今月の計画残数']].max(axis=1)
                 df_master_combined = df_master_combined[df_master_combined['採用ベース数量'] > 0].copy()
 
@@ -558,7 +557,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 大変お待たせいたしました！漢字タイポのバグを完全に修正しました。")
+                st.success(f"🎉 大変お待たせいたしました！今度こそすべての修正が完了しました。")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data, file_name=f"【確定完成版】{target_month}度_日次製造指示スケジュール表.xlsx",

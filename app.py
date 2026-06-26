@@ -22,6 +22,9 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("## 📅 スケジュール目標設定")
 target_days = st.sidebar.number_input("当月の目標稼働日数 (この日数以内に作り切る)", min_value=1, max_value=31, value=20)
 
+# 🌟【新機能：エクセルから対象の月度を狙い撃ちする選択欄を追加】
+target_month = st.sidebar.selectbox("計画対象の月度を選択してください", ["6月", "7月", "8月", "9月", "10月"])
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 1. ファイルのアップロード")
 file_zai = st.sidebar.file_uploader("① 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
@@ -37,9 +40,9 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
 st.sidebar.info(
     f"・選択中の工場: {factory_mode}\n"
+    f"・選択中の月度: {target_month}度計画\n"
     "・定時稼働時間: 430分/日 (16:30まで、計80分休憩除く)\n"
-    "・製造スピード: 5号機・2号機などの高速ラインを最優先稼働\n"
-    "・仕事融通：ラインが途中で止まらないよう、高速機が他ラインを自動応援製造\n"
+    "・仕事融通：ラインが途中で止まらないよう、高速機が自動応援製造\n"
     "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
@@ -110,7 +113,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner("現在、すべての現場ルールを同期させて精密パズルを組み立てています..."):
+        with st.spinner(f"現在、シート内から【{target_month}度】の計画列を自動検出してパズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -136,7 +139,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_fixed['品目名'] = df_zai_fixed['品目名'].ffill().astype(str).str.strip()
                 df_zai_fixed['安全在庫数'] = df_zai_fixed['安全在庫数'].ffill()
 
-                # 🌟【バグ完全根絶：エラーの原因となっていた重複・不正なor条件行を完全に消去しました】
                 df_zai_in_zai = df_zai_fixed[df_zai_fixed['種類'] == '在'].copy()
                 df_zai_in_zai['安全在庫数'] = pd.to_numeric(df_zai_in_zai['安全在庫数'], errors='coerce')
                 date_cols = [c for c in df_zai_in_zai.columns if '(日)' in str(c)]
@@ -153,20 +155,32 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     if any(kw in row_vals for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ']):
                         item_row_idx = i; break
 
-                target_month_col = None
+                # 🌟【アップデート：選択された月度（例：7月）に対応する「予定」列と「実績」列を自動インテリジェントスキャン】
+                plan_col_idx = None
+                actual_col_idx = None
+
+                # まずシートの上部数行から「7月」が含まれる列を横断検索
                 for r in range(item_row_idx + 1):
-                    row_vals = [str(v).strip() for v in df_monthly_raw.iloc[r].values]
-                    for c_idx, val in enumerate(row_vals):
-                        if '6月' in val or '当月' in val or '製造予定' in val:
-                            target_month_col = c_idx; break
-                    if target_month_col is not None: break
-                
-                plan_col_idx, actual_col_idx = (46, 47)
-                if target_month_col is not None:
-                    for c in range(target_month_col, min(target_month_col + 8, len(df_monthly_raw.columns))):
-                        col_val = str(df_monthly_raw.iloc[item_row_idx, c]).strip()
-                        if '予定' in col_val or '製造予定' in col_val: plan_col_idx = c
-                        elif '実績' in col_val or '製造実績' in col_val: actual_col_idx = c
+                    for c_idx in range(len(df_monthly_raw.columns)):
+                        cell_val = str(df_monthly_raw.iloc[r, c_idx]).strip()
+                        if target_month in cell_val:
+                            # 見つかった位置から右側6列の範囲で「予定(計画)」と「実績」の文字を特定
+                            for search_c in range(c_idx, min(c_idx + 6, len(df_monthly_raw.columns))):
+                                col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])
+                                if ('予定' in col_text or '計画' in col_text) and plan_col_idx is None:
+                                    plan_col_idx = search_c
+                                elif '実績' in col_text and actual_col_idx is None:
+                                    actual_col_idx = search_c
+
+                # 万が一エクセルから文字検出できなかった場合のセーフティネット（月度に応じた予測位置）
+                if plan_col_idx is None or actual_col_idx is None:
+                    try:
+                        month_num = int(target_month.replace("月", ""))
+                        base_offset = (month_num - 6) * 2
+                        plan_col_idx = 46 + base_offset
+                        actual_col_idx = 47 + base_offset
+                    except:
+                        plan_col_idx, actual_col_idx = 46, 47
 
                 code_col_idx, name_col_idx = (0, 1)
                 for c_idx in range(min(5, len(df_monthly_raw.columns))):
@@ -178,14 +192,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_m_clean = pd.DataFrame({
                     '品目コード': df_m.iloc[:, code_col_idx].astype(str).str.strip(),
                     '品目名_計画書': df_m.iloc[:, name_col_idx].astype(str).str.strip(),
-                    '6月_製造予定': pd.to_numeric(df_m.iloc[:, plan_col_idx], errors='coerce').fillna(0),
-                    '6月_製造実績': pd.to_numeric(df_m.iloc[:, actual_col_idx], errors='coerce').fillna(0)
+                    '選択月_製造予定': pd.to_numeric(df_m.iloc[:, plan_col_idx], errors='coerce').fillna(0),
+                    '選択月_製造実績': pd.to_numeric(df_m.iloc[:, actual_col_idx], errors='coerce').fillna(0)
                 })
-                df_m_clean['6月_計画残数'] = (df_m_clean['6月_製造予定'] - df_m_clean['6月_製造実績']).apply(lambda x: max(0, x))
+                df_m_clean['選択月_計画残数'] = (df_m_clean['選択月_製造予定'] - df_m_clean['選択月_製造実績']).apply(lambda x: max(0, x))
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (df_m_clean['品目コード'] != 'nan') & (df_m_clean['品目コード'] != '')].drop_duplicates(subset=['品目コード'])
 
                 # 3. アウター合流
-                all_codes = set(df_zai_in_zai['品目コード']).union(set(df_m_distinct[df_m_distinct['6月_計画残数'] > 0]['品目コード']))
+                all_codes = set(df_zai_in_zai['品目コード']).union(set(df_m_distinct[df_m_distinct['選択月_計画残数'] > 0]['品目コード']))
                 master_list = []
                 for code in all_codes:
                     if code in ['合計', 'nan', '商品CD', '品目コード', 'None']: continue
@@ -196,7 +210,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     safety_gap = zai_row['安全割れ不足数'].iloc[0] if not zai_row.empty else 0.0
                     current_stock = zai_row['現在の在庫'].iloc[0] if not zai_row.empty else np.nan
                     safety_stock = zai_row['安全在庫数'].iloc[0] if not zai_row.empty else np.nan
-                    plan_gap = plan_row['6月_計画残数'].iloc[0] if not plan_row.empty else 0.0
+                    plan_gap = plan_row['選択月_計画残数'].iloc[0] if not plan_row.empty else 0.0
                     
                     master_list.append({
                         '品目コード': code, '品目名': name, '現在の在庫': current_stock,
@@ -216,12 +230,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 parent_col = "商品CODE" if "商品CODE" in df_bom.columns else (df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
                 child_col = "配合CODE" if "配合CODE" in df_bom.columns else df_bom.columns[0]
                 
-                def extract_content_code(item_code):
-                    sub_bom = df_bom[df_bom[parent_col].astype(str).str.strip() == item_code]
-                    if sub_bom.empty: return item_code
-                    bh_items = sub_bom[sub_bom[child_col].astype(str).str.startswith('BH')]
-                    return bh_items[child_col].iloc[0] if not bh_items.empty else sub_bom[child_col].iloc[0]
-
                 df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
                 # 6. バッチ・指示数確定
@@ -235,7 +243,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
                 df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).round().astype(int)
 
-                # 製造理由の判定
+                # 製造理由の判定 (3種仕分け)
                 def determine_reason_advanced(row_item):
                     curr = row_item['現在の在庫']
                     if not pd.isna(curr) and curr < 0: return '現在庫がマイナス'
@@ -470,7 +478,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 ws_daily = wb.create_sheet(title="日別・号機別製造計画")
                 ws_daily.views.sheetView[0].showGridLines = True
-                ws_daily.append(["稼働日", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
+                ws_daily.append(["稼稼日", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
                 for job in full_schedule:
                     ws_daily.append([job['稼働日'], job['製造ライン'], job['配合コード'], job['品目コード'], job['品目名'], job['指示数量(袋)'], job['製造時間(分)'], job['切り替え(分)'], job['合計拘束時間(分)'], job['備考'], job['製造理由']])
 
@@ -584,10 +592,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 修正が完全に完了しました。最新の製造指示スケジュールがいつでも作成可能です！")
+                st.success(f"🎉 修正が完全に完了しました！選択された【{target_month}度】の計画を月跨ぎで処理可能です。")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
-                    data=excel_data, file_name=f"【確定完成版】日次製造指示スケジュール表.xlsx",
+                    data=excel_data, file_name=f"【確定完成版】{target_month}度_日次製造指示スケジュール表.xlsx",
                     mime="application/vnd.openpyxlformats-officedocument.spreadsheetml.sheet"
                 )
             except Exception as e: st.error(f"エラーが発生しました。詳細: {str(e)}")

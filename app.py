@@ -79,17 +79,16 @@ if df_bom is not None:
 else:
     st.sidebar.warning("⚠️ 構成表マスタが未登録です。GitHubに配置するか、ファイルを選択してください。")
 
-# 🌟【新ロジック：サイズ近接ソート関数】
+# サイズ近接ソート関数
 def sort_jobs_by_size_proximity(df_line):
     unprocessed = df_line.to_dict('records')
     if not unprocessed: return []
     processed = []
     
-    # 最初はキューの先頭（最も緊急度が高い配合グループ）
     first_job = unprocessed[0]
     first_recipe = first_job['中身設計コード']
     same_recipe_jobs = [j for j in unprocessed if j['中身設計コード'] == first_recipe]
-    same_recipe_jobs.sort(key=lambda x: x['容量_L'], reverse=True) # 同配合内は大->小
+    same_recipe_jobs.sort(key=lambda x: x['容量_L'], reverse=True) 
     processed.extend(same_recipe_jobs)
     for j in same_recipe_jobs: unprocessed.remove(j)
         
@@ -97,7 +96,6 @@ def sort_jobs_by_size_proximity(df_line):
         last_job = processed[-1]
         last_vol = last_job['容量_L']
         
-        # 残っている商品の中から、直前のサイズと「最も容量差が小さい」配合グループを貪欲に探索
         min_diff = float('inf')
         best_idx = -1
         for idx, j in enumerate(unprocessed):
@@ -106,7 +104,6 @@ def sort_jobs_by_size_proximity(df_line):
                 min_diff = diff
                 best_idx = idx
             elif diff == min_diff:
-                # サイズ差が同じなら緊急度が高い方を優先
                 if j['グループ緊急度'] < unprocessed[best_idx]['グループ緊急度']:
                     best_idx = idx
                     
@@ -253,7 +250,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
-                # 6. バッチ計算 (投入量に対して90%製品化)
+                # 6. バッチ計算
                 grouped = df_master_combined.groupby('中身設計コード').agg({'ベース必要容量_L': 'sum'}).reset_index()
                 grouped['純計算_m3_ロス込'] = (grouped['ベース必要容量_L'] / 0.9) / 1000
                 grouped['製造決定_m3'] = grouped['純計算_m3_ロス込'].apply(lambda m3: 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0)))
@@ -290,27 +287,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     return (row['計画製造袋数'] / speed) * 60
                 df_final['製造所要時間_分'] = df_final.apply(calc_duration_mins, axis=1)
 
-                # ソート用緊急度
-                df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(row['現在の在庫']) else 500, axis=1)
+                # 🌟【バグ修正：138行目 row['現在の在庫'] -> r['現在の在庫'] に直しました】
+                df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                 group_urgency = df_final.groupby('中身設計コード')['緊急度'].min().to_dict()
                 df_final['グループ緊急度'] = df_final['中身設計コード'].map(group_urgency)
 
-                # 🌟【各号機ごとに、サイズ順＆大→小切り替え優先でソート】
                 df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(
                     by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]
                 ).copy()
 
-                # 🌟 10. 【最新機能：複数人対応・オペレーターペア稼働カレンダーハメ込み】
+                # 10. 複数人対応・オペレーターペア稼働カレンダーハメ込み
                 queues = {}
                 for line in ['2号機', '3号機', '5号機', '6号機']:
-                    # ここで各ラインに「サイズ近接ソート」を適用！
                     line_df = df_final_sorted[df_final_sorted['製造ライン'] == line]
                     if not line_df.empty:
                         queues[line] = sort_jobs_by_size_proximity(line_df)
                     else:
                         queues[line] = []
 
-                # 進捗ポインタと残り袋数の管理
                 current_job_idx = {l: 0 for l in queues}
                 for l in queues:
                     for j in queues[l]: j['remaining_bags'] = j['計画製造袋数']
@@ -319,16 +313,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 full_schedule = []
 
                 while True:
-                    # その日、各ラインに仕事が残っているかチェック
                     active_lines = []
                     for l in ['2号機', '3号機', '5号機', '6号機']:
                         idx = current_job_idx[l]
                         if idx < len(queues[l]) and queues[l][idx]['remaining_bags'] > 0:
                             active_lines.append(l)
                     
-                    if not active_lines: break # 全ラインの仕事が終了したらシミュレーション完了
+                    if not active_lines: break 
 
-                    # ペア稼働の選別ロジック（4ライン揃うならフル、揃わないなら2-6、3-5のペア稼働）
                     has_pair_2_6 = ('2号機' in active_lines) or ('6号機' in active_lines)
                     has_pair_3_5 = ('3号機' in active_lines) or ('5号機' in active_lines)
                     
@@ -339,7 +331,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     elif has_pair_3_5 and not has_pair_2_6:
                         lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
                     else:
-                        # 4ライン揃わないが、両方のペアに仕事が残っている場合、総残り袋数の多いペアを本日の稼働として優先
                         weight_2_6 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['2号機', '6号機'] if l in active_lines])
                         weight_3_5 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['3号機', '5号機'] if l in active_lines])
                         if weight_2_6 >= weight_3_5:
@@ -347,7 +338,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         else:
                             lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
 
-                    # 選ばれたラインの時間を1日分（415分）流す
                     for line in lines_to_run_today:
                         time_spent = 0.0
                         prev_recipe = None
@@ -409,7 +399,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 prev_vol = job['容量_L']
                                 break
                     day += 1
-                    if day > 40: break # 安全ブレーキ
+                    if day > 40: break 
 
                 # 11. 高級エクセル自動装飾・出力
                 wb = Workbook()
@@ -436,15 +426,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         job['指示数量(袋)'], job['製造時間(分)'], job['切り替え(分)'], job['合計拘束時間(分)'], job['備考']
                     ])
 
-                # 🌟【シート③：2026.06形式 1時間刻みタイムテーブルシートの自動生成】
+                # シート③：1時間刻みタイムテーブルシート
                 ws_timeline = wb.create_sheet(title="日別時間軸タイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
-                # 時間枠ヘッダー定義 (415分を1時間単位で7分割)
                 time_slots = ["8:00〜", "9:00〜", "10:00〜", "11:00〜", "13:00〜", "14:00〜", "15:00〜"]
                 max_days_generated = max([int(j['稼働日'].replace("日目", "")) for j in full_schedule]) if full_schedule else 1
                 
-                # 1〜2行目の日付と時間ヘッダーの組み立て
                 row1 = ["予備", "号機"]
                 row2 = ["", ""]
                 for d in range(1, max_days_generated + 1):
@@ -454,11 +442,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline.append(row1)
                 ws_timeline.append(row2)
                 
-                # 号機ごとのセル初期化
                 line_map = {"2号機": "NO.2", "3号機": "NO.3", "5号機": "NO.5", "6号機": "NO.6"}
                 timeline_rows = {l: ["", line_map[l]] + [""] * (max_days_generated * 7) for l in line_map}
                 
-                # ジョブを時間セルにマッピングしてハメ込む
                 for job in full_schedule:
                     d_idx = int(job['稼働日'].replace("日目", "")) - 1
                     l_key = job['製造ライン']
@@ -467,12 +453,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     start_m = job['開始時間_分']
                     end_m = start_m + job['製造時間(分)']
                     
-                    # 開始〜終了時間が属するスロット(0〜6)を割り出して文字を追記
                     for slot_idx in range(7):
                         slot_start = slot_idx * 60
                         slot_end = slot_start + 60 if slot_idx < 6 else 415.0
                         
-                        # ジョブの時間がこの1時間枠に少しでも重なっているか
                         if max(start_m, slot_start) < min(end_m, slot_end):
                             cell_pos = 2 + (d_idx * 7) + slot_idx
                             txt = f"{job['品目名']}\n({job['指示数量(袋)']}袋)\n"
@@ -494,7 +478,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 thin_side = Side(border_style="thin", color="D9D9D9")
                 border_all = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-                # 通常シートの装飾
                 for ws in [ws_summary, ws_daily]:
                     ws.row_dimensions[1].height = 26
                     for cell in ws[1]:
@@ -515,7 +498,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         ws.column_dimensions[get_column_letter(col[0].column)].width = max(max_len + 3, 12)
                     ws.freeze_panes = "A2"
 
-                # 🌟 タイムテーブルシート専用の超美麗装飾
                 ws_timeline.row_dimensions[1].height = 24
                 ws_timeline.row_dimensions[2].height = 20
                 for cell in ws_timeline[1]:
@@ -523,18 +505,16 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 for cell in ws_timeline[2]:
                     cell.fill = header_fill_tl; cell.font = bold_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
-                # 日付セルのマージ結合 (7列ずつマージしてスッキリさせる)
                 for d in range(max_days_generated):
                     start_col = 3 + (d * 7)
                     ws_timeline.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=start_col+6)
 
                 for row_idx in range(3, ws_timeline.max_row + 1):
-                    ws_timeline.row_dimensions[row_idx].height = 75 # 改行テキストが見えるように高さを広げる
+                    ws_timeline.row_dimensions[row_idx].height = 75 
                     for cell in ws_timeline[row_idx]:
                         cell.font = regular_font; cell.border = border_all
-                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True) # 自動改行
+                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True) 
                 
-                # タイムテーブルの列幅設定
                 ws_timeline.column_dimensions['A'].width = 8
                 ws_timeline.column_dimensions['B'].width = 10
                 for c in range(3, ws_timeline.max_column + 1):

@@ -89,7 +89,7 @@ def sort_jobs_by_size_proximity(df_line):
         for j in same_recipe_jobs: unprocessed.remove(j)
     return processed
 
-# 🌟【バグ完全根絶：マスタ読込ロジックをボタンの外側の正しい位置に復帰させました】
+# マスタ読込ロジック
 df_bom = None
 if file_bom is not None:
     if file_bom.name.endswith('.csv'):
@@ -254,6 +254,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]).copy()
 
+                queues_base = {}
+                for line in ['2号機', '3号機', '5号機', '6号機']:
+                    line_df = df_final_sorted[df_final_sorted['製造ライン'] == line]
+                    queues_base[line] = sort_jobs_by_size_proximity(line_df) if not line_df.empty else []
+
                 # シミュレーションパズル関数
                 def run_simulation(capacity_limit):
                     queues = copy.deepcopy(queues_base)
@@ -403,7 +408,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 overtime_mins = 0
                 daily_capacity = 430.0
 
-                # 🌟【30分残業ブロック探索ロジックの完全連動】
+                # 30分残業ブロック探索ロジック
                 if generated_days > target_days:
                     for cap_int in range(460, 641, 30): 
                         test_sched, test_days = run_simulation(float(cap_int))
@@ -529,8 +534,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]: cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
+                # 🌟【バグ完全消滅：問題の「ws.timeline」となっていた箇所を「ws_timeline」へ一文字残さず完璧に修正しました！】
                 for d in range(max_days_generated):
-                    ws.timeline.merge_cells(start_row=2+(d*4), start_column=1, end_row=2+(d*4)+3, end_column=1)
                     ws_timeline.merge_cells(start_row=2+(d*4), start_column=1, end_row=2+(d*4)+3, end_column=1)
 
                 for row_idx in range(2, ws_timeline.max_row + 1):

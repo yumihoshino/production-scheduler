@@ -34,11 +34,11 @@ else:
 file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (ExcelまたはCSV)", type=["xlsx", "csv"])
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
+st.sidebar.markdown("### ⚙️ 実績同期・固定ルール")
 st.sidebar.info(
     f"・選択中の工場: {factory_mode}\n"
     "・定時稼働時間: 430分/日 (16:30まで、計80分休憩除く)\n"
-    "・ロス率: 10% (投入量の90%を製品化)\n"
+    "・製造スピード: ★今年度製造実績レポートの平均値を適用\n"
     "・段取り替え: 異配合時は直前と「最も近いサイズ」を優先\n"
     "・人員制約: 全稼働を最優先、不可時は[2-6ペア] [3-5ペア]で連動\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
@@ -110,7 +110,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner("現在、すべての現場ルールを同期させて精密パズルを組み立てています..."):
+        with st.spinner("現在、今年度実績レポートの製造スピードを適用して、超リアルなパズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -242,12 +242,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: '腐葉土' in str(n) or '堆肥' in str(n) or '特大袋' in str(n))
                 df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
 
+                # 🌟【新機能：製造実績レポートに基づいた「リアルな実力値スピード」の自動適用】
                 def calc_duration_mins(row_item):
+                    vol = row_item['容量_L']
                     if row_item['計画製造袋数'] <= 0: return 0.0
-                    if row_item['製造ライン'] == '2号機': speed = 500
-                    elif row_item['製造ライン'] == '3号機': speed = 300
-                    elif row_item['製造ライン'] == '5号機': speed = 1000 if row_item['容量_L'] == 14 else (700 if row_item['容量_L'] == 25 else 750)
-                    elif row_item['製造ライン'] == '6号機': speed = 300
+                    if row_item['製造ライン'] == '2号機': speed = 400  # 実績平均 404袋/h
+                    elif row_item['製造ライン'] == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 250)  # 実績特大70L、通常250袋/h
+                    elif row_item['製造ライン'] == '5号機': speed = 730 if vol in [12, 14] else 650  # 実績14Lは730袋、大袋は650袋/h
+                    elif row_item['製造ライン'] == '6号機': speed = 260  # 実績平均 260袋/h
                     else: speed = 400
                     return (row_item['計画製造袋数'] / speed) * 60
                 df_final['製造所要時間_分'] = df_final.apply(calc_duration_mins, axis=1)
@@ -281,19 +283,19 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if required_daily_mins > 430.0:
                     overtime_mins = math.ceil(required_daily_mins - 430.0)
                     daily_capacity = 430.0 + overtime_mins
-                    if daily_capacity > 640.0: 
+                    if daily_capacity > 640.0: # 20:00上限
                         daily_capacity = 640.0
                         overtime_mins = 210
                 else:
                     daily_capacity = 430.0
 
                 if overtime_mins > 0:
-                    total_elapsed = daily_capacity + 80 
+                    total_elapsed = daily_capacity + 80 # 全休憩80分加算
                     end_hour = 8 + int(total_elapsed // 60)
                     end_min = int(total_elapsed % 60)
-                    st.warning(f"📢 【残業アラート】計画を{target_days}日以内に終わらせるため、毎日 【{overtime_mins}分】の均等残業が必要です！ 稼働時間を一律 【{end_hour}:{end_min:02d}終了】 に平準化して指示書を生成します。")
+                    st.warning(f"📢 【残業アラート】実績データに基づき計算した結果、計画を{target_days}日以内に終わらせるため毎日 【{overtime_mins}分】の均等残業が必要です！ 稼働時間を一律 【{end_hour}:{end_min:02d}終了】 に平準化して指示書を生成します。")
                 else:
-                    st.success(f"🟢 【残業なし】今月の計画は、通常の定時稼働（16:30終了）のまま、{target_days}日以内ですべて安全に作り切れます！")
+                    st.success(f"🟢 【残業なし】実績データに照らし合わせても、通常の定時稼働（16:30終了）のまま、{target_days}日以内ですべて安全に作り切れます！")
 
                 # パズル実行
                 current_job_idx = {l: 0 for l in queues}
@@ -340,10 +342,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             if available_time <= 5.0: break
                             
                             vol = job['容量_L']
-                            if line == '2号機': speed_per_min = 500 / 60
-                            elif line == '3号機': speed_per_min = 300 / 60
-                            elif line == '5号機': speed_per_min = 1000 / 60 if vol == 14 else (700 / 60 if vol == 25 else 750 / 60)
-                            else: speed_per_min = 300 / 60
+                            # 🌟【パズル内部のスピード計算も実績データに連動】
+                            if line == '2号機': speed_per_min = 400 / 60
+                            elif line == '3号機': speed_per_min = 70 / 60 if vol == 55 else (100 / 60 if vol == 30 else 250 / 60)
+                            elif line == '5号機': speed_per_min = 730 / 60 if vol in [12, 14] else 650 / 60
+                            else: speed_per_min = 260 / 60
                             
                             max_bags_today = available_time * speed_per_min
                             start_time_current = time_spent + switch_time
@@ -352,7 +355,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 bags_to_make = job['remaining_bags']
                                 job_duration = bags_to_make / speed_per_min
                                 time_spent += switch_time + job_duration
-                                # 🌟【製造理由をタスクに記憶させる】
                                 full_schedule.append({
                                     '稼働日': f"{day}日目", '製造ライン': line, '配合コード': job['中身設計コード'],
                                     '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(bags_to_make),
@@ -367,7 +369,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 if bags_to_make <= 0: break
                                 job_duration = bags_to_make / speed_per_min
                                 time_spent += switch_time + job_duration
-                                # 🌟【製造理由をタスクに記憶させる】
                                 full_schedule.append({
                                     '稼働日': f"{day}日目", '製造ライン': line, '配合コード': job['中身設計コード'],
                                     '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(bags_to_make),
@@ -395,13 +396,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 # シート②: 日別・号機別製造計画
                 ws_daily = wb.create_sheet(title="日別・号機別製造計画")
                 ws_daily.views.sheetView[0].showGridLines = True
-                # 🌟【ヘッダーの最後に「製造理由」を追加】
                 ws_daily.append(["稼働日", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
                 for job in full_schedule:
-                    # 🌟【各行のデータの最後にも「製造理由」を追加して出力】
                     ws_daily.append([job['稼働日'], job['製造ライン'], job['配合コード'], job['品目コード'], job['品目名'], job['指示数量(袋)'], job['製造時間(分)'], job['切り替え(分)'], job['合計拘束時間(分)'], job['備考'], job['製造理由']])
 
-                # シート③：30分刻みタイムテーブル
+                # シート③：ガントチャート型タイムテーブル
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
@@ -511,7 +510,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 16:30定時（計3回・80分休憩完全ガード版）の製造指示スケジュールが完成しました！")
+                st.success(f"🎉 実績レポートデータと完全同期した製造指示スケジュールが完成しました！")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data, file_name=f"【確定完成版】日次製造指示スケジュール表.xlsx",

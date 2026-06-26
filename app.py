@@ -1,4 +1,4 @@
-import streamlit st
+import streamlit as st  # 🌟【1行目の as st を完全に修復しました！】
 import pandas as pd
 import numpy as np
 import math
@@ -136,6 +136,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_fixed['品目名'] = df_zai_fixed['品目名'].ffill().astype(str).str.strip()
                 df_zai_fixed['安全在庫数'] = df_zai_fixed['安全在庫数'].ffill()
 
+                df_zai_in_zai = df_zai_fixed[df_zai_fixed['種類'] == '放' or df_zai_fixed['種類'] == '在'].copy()
                 df_zai_in_zai = df_zai_fixed[df_zai_fixed['種類'] == '在'].copy()
                 df_zai_in_zai['安全在庫数'] = pd.to_numeric(df_zai_in_zai['安全在庫数'], errors='coerce')
                 date_cols = [c for c in df_zai_in_zai.columns if '(日)' in str(c)]
@@ -215,7 +216,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 parent_col = "商品CODE" if "商品CODE" in df_bom.columns else (df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
                 child_col = "配合CODE" if "配合CODE" in df_bom.columns else df_bom.columns[0]
                 
-                # 🌟【完全修復：消えていた関数定義ブロックを100%確実にここに再配置しました】
                 def extract_content_code(item_code):
                     sub_bom = df_bom[df_bom[parent_col].astype(str).str.strip() == item_code]
                     if sub_bom.empty: return item_code
@@ -290,8 +290,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if required_daily_mins > 430.0:
                     overtime_mins = math.ceil(required_daily_mins - 430.0)
                     daily_capacity = 430.0 + overtime_mins
-                    if daily_capacity > 640.0: 
-                        daily_capacity = 640.0; overtime_mins = 210
+                    if daily_capacity > 640.0: daily_capacity = 640.0; overtime_mins = 210
                 else:
                     daily_capacity = 430.0
 
@@ -561,6 +560,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     ws.freeze_panes = "A2"
 
                 ws_timeline.row_dimensions[1].height = 26
+                ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]: cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
                 for d in range(max_days_generated):
@@ -585,7 +585,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 タイムテーブルのハミ出し表示を100%修正した、最新の製造指示スケジュールが完成しました！")
+                st.success(f"🎉 製造指示スケジュール（16:30通常ベース）の作成が完了しました！ダウンロードしてご確認ください。")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data, file_name=f"【確定完成版】日次製造指示スケジュール表.xlsx",

@@ -1,4 +1,4 @@
-import streamlit st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import math
@@ -40,6 +40,7 @@ st.sidebar.info(
     "・定時稼働時間: 430分/日 (16:30まで、計80分休憩除く)\n"
     "・製造スピード: 5号機・2号機などの高速ラインを最優先稼働\n"
     "・仕事融通：ラインが途中で止まらないよう、高速機が他ラインを自動応援製造\n"
+    "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
@@ -109,7 +110,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner("現在、高速ラインを最優先し、止まらないように仕事を自動融通しながらパズルを解いています..."):
+        with st.spinner("現在、高速ラインを最優先し、3つの製造理由を精密に判定してパズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -232,16 +233,26 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_volume_by_recipe).fillna(1.0)
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
                 df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).round().astype(int)
-                df_final['製造理由'] = df_final.apply(lambda r: '在庫不足（安全割れ）' if r['安全割れ不足数'] > 0 else '計画未達', axis=1)
 
-                # 足切りルール
+                # 🌟【アップデート：製造理由を精密に3種へ仕分け】
+                def determine_reason_advanced(row_item):
+                    curr = row_item['現在の在庫']
+                    if not pd.isna(curr) and curr < 0:
+                        return '現在庫がマイナス'
+                    elif row_item['安全割れ不足数'] > 0:
+                        return '安全在庫割れ'
+                    else:
+                        return '計画未達'
+                df_final['製造理由'] = df_final.apply(determine_reason_advanced, axis=1)
+
+                # 足切りルール (現在庫マイナス、安全割れは100袋未満でも100%スキップしない)
                 df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1)
 
                 # 8. 製造ライン判定
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: '腐葉土' in str(n) or '堆肥' in str(n) or '特大袋' in str(n))
                 df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
 
-                # 実績レポートデータに基づいたスピード計算式
+                # 実績スピードの適用
                 def calc_duration_mins_by_line(line, vol, bags):
                     if bags <= 0: return 0.0
                     if line == '2号機': speed = 400
@@ -257,13 +268,12 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]).copy()
 
-                # 号機別の持ちネタ仕事キュー作成（初期配置）
                 queues = {}
                 for line in ['2号機', '3号機', '5号機', '6号機']:
                     line_df = df_final_sorted[df_final_sorted['製造ライン'] == line]
                     queues[line] = sort_jobs_by_size_proximity(line_df) if not line_df.empty else []
 
-                # 残業平準化ロジック (定時430分基準)
+                # 残業平準化ロジック
                 total_mins_by_line = {}
                 for l in ['2号機', '3号機', '5号機', '6号機']:
                     mins = 0.0
@@ -283,8 +293,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     overtime_mins = math.ceil(required_daily_mins - 430.0)
                     daily_capacity = 430.0 + overtime_mins
                     if daily_capacity > 640.0: 
-                        daily_capacity = 640.0
-                        overtime_mins = 210
+                        daily_capacity = 640.0; overtime_mins = 210
                 else:
                     daily_capacity = 430.0
 
@@ -296,7 +305,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 else:
                     st.success(f"🟢 【残業なし】通常の定時稼働（16:30終了）のまま、{target_days}日以内ですべて安全に作り切れます！")
 
-                # 進捗・残り数量の初期化
+                # パズル実行
                 current_job_idx = {l: 0 for l in queues}
                 for l in queues:
                     for j in queues[l]: j['remaining_bags'] = j['計画製造袋数']
@@ -305,34 +314,28 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 full_schedule = []
 
                 while True:
-                    # 🌟【アップデート：高速ライン（5号機・2号機）の残仕事を最優先にチェック】
                     active_lines = []
-                    for l in ['5号機', '2号機', '6号機', '3号機']: # スピードが早い順にチェック
-                        # メイン仕事、または他ラインから引き受けられる応援仕事が残っているか
+                    for l in ['5号機', '2号機', '6号機', '3号機']: # スピード順スキャン
                         has_work = False
                         if current_job_idx[l] < len(queues[l]) and queues[l][current_job_idx[l]]['remaining_bags'] > 0:
                             has_work = True
                         else:
-                            # 応援可能な仕事が他ラインに残っているかスキャン
                             for ol in ['6号機', '2号機', '5号機', '3号機']:
                                 if ol == l: continue
                                 for job in queues[ol]:
                                     if job['remaining_bags'] > 0:
                                         if l == '5号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: has_work = True
                                         if l == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: has_work = True
-                        if has_work:
-                            active_lines.append(l)
+                        if has_work: active_lines.append(l)
 
                     if not active_lines: break 
 
-                    # 🌟【アップデート：高速ラインが属定するペアを最優先で稼働させる】
                     has_pair_2_6 = ('2号機' in active_lines) or ('6号機' in active_lines)
                     has_pair_3_5 = ('3号機' in active_lines) or ('5号機' in active_lines)
                     
                     if '2号機' in active_lines and '3号機' in active_lines and '5号機' in active_lines and '6号機' in active_lines:
                         lines_to_run_today = ['2号機', '3号機', '5号機', '6号機']
                     elif has_pair_3_5 and ('5号機' in active_lines or not has_pair_2_6):
-                        # 最速の5号機が動ける、あるいは3-5側にしか仕事がない場合は3-5ペア
                         lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
                     else:
                         lines_to_run_today = [l for l in ['2号機', '6号機'] if l in active_lines]
@@ -341,11 +344,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         time_spent = 0.0
                         prev_recipe, prev_vol = None, None
                         
-                        # 1日の時間を流すループ
                         while time_spent < daily_capacity:
                             idx = current_job_idx[line]
                             
-                            # A. まず自分のメイン仕事をこなす
+                            # A. メイン仕事
                             if idx < len(queues[line]):
                                 job = queues[line][idx]
                                 switch_time = 0.0
@@ -393,29 +395,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     prev_recipe, prev_vol = job['中身設計コード'], job['容量_L']
                                     break
                             
-                            # 🌟【新機能：メイン仕事が完了して時間が余ったら、他ラインの仕事を自動で引き受ける（応援製造）】
+                            # B. 応援製造
                             else:
                                 supported_job_found = False
-                                # 仕事が溜まっている重い号機から順番にスキャンして仕事を横取りする
                                 for other_line in ['6号機', '2号機', '5号機', '3号機']:
                                     if other_line == line: continue
-                                    
                                     for job in queues[other_line]:
                                         if job['remaining_bags'] <= 0: continue
                                         
-                                        # 5号機・2号機が引き受け可能なサイズ・特性か判定
                                         can_support = False
                                         if line == '5号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: can_support = True
                                         if line == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: can_support = True
                                         
                                         if can_support:
-                                            # 応援製造の段取り替え
-                                            switch_time = 10.0 # 異ライン切り替えは一律10分
+                                            switch_time = 10.0
                                             available_time = daily_capacity - time_spent - switch_time
                                             if available_time <= 5.0: break
                                             
                                             vol = job['容量_L']
-                                            # 自分の機械のスピードで処理
                                             if line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
                                             else: speed_per_min = 400 / 60
                                             
@@ -450,10 +447,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                             
                                             supported_job_found = True
                                             prev_recipe, prev_vol = job['中身設計コード'], job['容量_L']
-                                            break # 応援を1件ハメ込んだので再ループ
+                                            break
                                     if supported_job_found: break
-                                
-                                # 応援できる仕事すら全ラインで枯渇した場合、本日終了
                                 if not supported_job_found: break
                     day += 1
                     if day > 40: break 
@@ -476,7 +471,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 for job in full_schedule:
                     ws_daily.append([job['稼働日'], job['製造ライン'], job['配合コード'], job['品目コード'], job['品目名'], job['指示数量(袋)'], job['製造時間(分)'], job['切り替え(分)'], job['合計拘束時間(分)'], job['備考'], job['製造理由']])
 
-                # シート③：30分刻みタイムテーブル
+                # シート③：ガントタイムテーブル
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
@@ -527,10 +522,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 if s_idx == 24: s_end = 640.0
                                 if s_start is not None and s_end is not None:
                                     if max(start_m, s_start) < min(end_m, s_end):
-                                        # 応援製造の場合はタイムテーブル上でも★マークをつけて区別する
-                                        prefix = ""
-                                        if "応援製造" in str(job.get('備考', '')):
-                                            prefix = "★(応援)\n"
+                                        prefix = "★(応援)\n" if "応援製造" in str(job.get('備考', '')) else ""
                                         txt = f"{prefix}{job['品目名']}\n({job['指示数量(袋)']}袋)\n"
                                         if row_item['slots'][s_idx] == "": row_item['slots'][s_idx] = txt
                                         else: row_item['slots'][s_idx] += "＋\n" + txt
@@ -590,7 +582,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 高速ライン優先＆自動仕事融通（応援）ロジックが組み込まれた【決定版指示書】が完成しました！")
+                st.success(f"🎉 製造理由が3種に高精度識別された、最新のスケジュール指示書が完成しました！")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data, file_name=f"【確定完成版】日次製造指示スケジュール表.xlsx",

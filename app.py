@@ -19,6 +19,10 @@ st.sidebar.markdown("## 🏢 工場の選択")
 factory_mode = st.sidebar.selectbox("対象の工場を選択してください", ["本社", "関西工場"])
 
 st.sidebar.markdown("---")
+st.sidebar.markdown("## 📅 スケジュール目標設定")
+target_days = st.sidebar.number_input("当月の目標稼働日数 (この日数以内に作り切る)", min_value=1, max_value=31, value=20)
+
+st.sidebar.markdown("---")
 st.sidebar.markdown("## 1. ファイルのアップロード")
 file_zai = st.sidebar.file_uploader("① 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
 
@@ -28,19 +32,6 @@ else:
     file_gekkan = st.sidebar.file_uploader("② 関西工場 月間製造計画書 (Excel形式: .xlsx)", type=["xlsx"])
 
 file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (ExcelまたはCSV)", type=["xlsx", "csv"])
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
-st.sidebar.info(
-    f"・選択中の工場: {factory_mode}\n"
-    "・定時稼働時間: 415分/日\n"
-    "・ロス率: 10% (投入量の90%を製品化)\n"
-    "・最小5m3 / 基本10m3 バッチルール\n"
-    "・段取り替え: 異配合時は直前と「最も近いサイズ」を優先\n"
-    "・人員制約: 全稼働を最優先、不可時は[2-6ペア] [3-5ペア]で連動\n"
-    "・タイムテーブル: 縦軸[日×号機] / 横軸[30分刻み時間軸]\n"
-    "・足切り: 欠品時を除き100袋未満は自動スキップ"
-)
 
 # 複数シートから目的のシートを自動検知して読み込む関数
 def load_excel_sheet_smart(file, keywords):
@@ -123,7 +114,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタがシステム内に見つかりません。")
     else:
-        with st.spinner("現在、ご指定のガントレイアウト（縦軸：日×号機、横軸：30分刻み）にパズルを組み立てています..."):
+        with st.spinner("現在、12:00の休憩時間を完全ロックして平準化パズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -288,7 +279,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     return (row['計画製造袋数'] / speed) * 60
                 df_final['製造所要時間_分'] = df_final.apply(calc_duration_mins, axis=1)
 
-                # ソート用緊急度
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                 group_urgency = df_final.groupby('中身設計コード')['緊急度'].min().to_dict()
                 df_final['グループ緊急度'] = df_final['中身設計コード'].map(group_urgency)
@@ -297,15 +287,49 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]
                 ).copy()
 
-                # 10. 複数人対応・オペレーターペア稼働カレンダーハメ込み
+                # 号機別の仕事キュー作成（サイズ近接適用）
                 queues = {}
                 for line in ['2号機', '3号機', '5号機', '6号機']:
                     line_df = df_final_sorted[df_final_sorted['製造ライン'] == line]
-                    if not line_df.empty:
-                        queues[line] = sort_jobs_by_size_proximity(line_df)
-                    else:
-                        queues[line] = []
+                    queues[line] = sort_jobs_by_size_proximity(line_df) if not line_df.empty else []
 
+                # 残業時間の事前予測＆毎日一律平準化システム
+                total_mins_by_line = {}
+                for l in ['2号機', '3号機', '5号機', '6号機']:
+                    mins = 0.0
+                    prev_r, prev_v = None, None
+                    for j in queues[l]:
+                        mins += j['製造所要時間_分']
+                        if prev_r is not None:
+                            if prev_r == j['中身設計コード']:
+                                mins += 5.0 if (prev_v and prev_v > j['容量_L']) else 10.0
+                            else: mins += 10.0
+                        prev_r, prev_v = j['中身設計コード'], j['容量_L']
+                    total_mins_by_line[l] = mins
+                
+                max_line_mins = max(total_mins_by_line.values()) if total_mins_by_line else 0
+                required_daily_mins = max_line_mins / target_days
+                
+                overtime_mins = 0
+                if required_daily_mins > 415.0:
+                    overtime_mins = math.ceil(required_daily_mins - 415.0)
+                    daily_capacity = 415.0 + overtime_mins
+                    if daily_capacity > 660.0:  # 20:00上限
+                        daily_capacity = 660.0
+                        overtime_mins = 245
+                else:
+                    daily_capacity = 415.0
+
+                # 画面への通知表示
+                if overtime_mins > 0:
+                    total_elapsed = daily_capacity + 60 # 昼休憩の60分を実際の経過時間にプラス
+                    end_hour = 8 + int(total_elapsed // 60)
+                    end_min = int(total_elapsed % 60)
+                    st.warning(f"📢 【残業アラート】今月の計画を{target_days}日以内に終わらせるため、毎日 【{overtime_mins}分】の均等残業が必要です！ 稼働時間を一律 【{end_hour}:{end_min:02d}終了】 に平準化して指示書を生成します。")
+                else:
+                    st.success(f"🟢 【残業なし】今月の計画は、毎日定時（15:55終了）のまま、{target_days}日以内ですべて安全に作り切れます！")
+
+                # 日次ハメ込みパズルの開始
                 current_job_idx = {l: 0 for l in queues}
                 for l in queues:
                     for j in queues[l]: j['remaining_bags'] = j['計画製造袋数']
@@ -340,11 +364,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
 
                     for line in lines_to_run_today:
-                        time_spent = 0.0
-                        prev_recipe = None
-                        prev_vol = None
+                        time_spent = 0.0  # 純粋な稼働分数（休憩を除く）
+                        prev_recipe, prev_vol = None, None
                         
-                        while time_spent < 415.0:
+                        while time_spent < daily_capacity:
                             idx = current_job_idx[line]
                             if idx >= len(queues[line]): break
                             job = queues[line][idx]
@@ -353,10 +376,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             if time_spent > 0.0 and prev_recipe is not None:
                                 if prev_recipe == job['中身設計コード']:
                                     switch_time = 5.0 if (prev_vol and prev_vol > job['容量_L']) else 10.0
-                                else:
-                                    switch_time = 10.0
+                                else: switch_time = 10.0
                             
-                            available_time = 415.0 - time_spent - switch_time
+                            available_time = daily_capacity - time_spent - switch_time
                             if available_time <= 5.0: break
                             
                             vol = job['容量_L']
@@ -381,8 +403,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 })
                                 job['remaining_bags'] = 0
                                 current_job_idx[line] += 1
-                                prev_recipe = job['中身設計コード']
-                                prev_vol = job['容量_L']
+                                prev_recipe, prev_vol = job['中身設計コード'], job['容量_L']
                             else:
                                 bags_to_make = math.floor(max_bags_today)
                                 if bags_to_make <= 0: break
@@ -396,8 +417,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     '切り替え(分)': round(switch_time, 1), '合計拘束時間(分)': round(switch_time + job_duration, 1), '備考': '翌日へ分割継続'
                                 })
                                 job['remaining_bags'] -= bags_to_make
-                                prev_recipe = job['中身設計コード']
-                                prev_vol = job['容量_L']
+                                prev_recipe, prev_vol = job['中身設計コード'], job['容量_L']
                                 break
                     day += 1
                     if day > 40: break 
@@ -407,7 +427,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.remove(wb.active)
 
                 # シート①: 集計マスタ
-                ws_summary = wb.create_sheet(title=f"製造品目・バッチ集計({factory_mode})")
+                ws_summary = wb.create_sheet(title=f"製造品目・バッチ集計")
                 ws_summary.views.sheetView[0].showGridLines = True
                 ws_summary.append(["品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "今月の計画残数", "決定製造m3", "最終製造総数(袋)", "製造理由"])
                 for idx, row in df_final_sorted.iterrows():
@@ -418,7 +438,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     ])
 
                 # シート②: 日次指示一覧
-                ws_daily = wb.create_sheet(title=f"日別・号機別製造計画({factory_mode})")
+                ws_daily = wb.create_sheet(title=f"日別・号機別製造計画")
                 ws_daily.views.sheetView[0].showGridLines = True
                 ws_daily.append(["稼働日", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考"])
                 for job in full_schedule:
@@ -427,38 +447,47 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         job['指示数量(袋)'], job['製造時間(分)'], job['切り替え(分)'], job['合計拘束時間(分)'], job['備考']
                     ])
 
-                # 🌟【シート③：大刷新！ 縦軸[日×号機] / 横軸[30分刻み時間] ガントテーブル】
+                # シート③：ガントチャート型タイムテーブルシート（お昼休憩完全ロック・20:00拡張版）
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
-                # 30分刻みの時間枠名義（14スロット分、横軸に展開）
+                # 30分刻みの時間枠（横軸に展開、12:00〜13:00はお昼休憩枠）
                 time_slots = [
                     "8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", 
                     "10:00〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", 
-                    "12:00〜12:30", "12:30〜13:00", "13:00〜13:30", "13:30〜14:00", 
-                    "14:00〜14:30", "14:30〜14:55"
+                    "12:00〜13:00(昼休憩)", 
+                    "13:00〜13:30", "13:30〜14:00", "14:00〜14:30", "14:30〜15:00", 
+                    "15:00〜15:30", "15:30〜16:00", "16:00〜16:30", "16:30〜17:00", 
+                    "17:00〜17:30", "17:30〜18:00", "18:00〜18:30", "18:30〜19:00", 
+                    "19:00〜19:30", "19:30〜20:00"
                 ]
                 
-                # 要望通りのヘッダー構造（横軸が時間枠）
                 ws_timeline.append(["稼働日", "製造ライン"] + time_slots)
                 
                 max_days_generated = max([int(j['稼働日'].replace("日目", "")) for j in full_schedule]) if full_schedule else 1
                 lines_list = ["2号機", "3号機", "5号機", "6号機"]
                 line_display_map = {"2号機": "NO.2", "3号機": "NO.3", "5号機": "NO.5", "6号機": "NO.6"}
                 
-                # 各日×各ラインの「行」ベースのマトリクスを初期化
                 matrix_rows = []
                 for d in range(1, max_days_generated + 1):
                     for line in lines_list:
                         matrix_rows.append({
-                            'day_num': d,
-                            'day_str': f"{d}日目",
-                            'line_name': line,
-                            'line_disp': line_display_map[line],
-                            'slots': [""] * 14  # 14スロット分の空文字列
+                            'day_num': d, 'day_str': f"{d}日目",
+                            'line_name': line, 'line_disp': line_display_map[line],
+                            'slots': [""] * 23  # 昼休憩を含む全23マス
                         })
                 
-                # ジョブを時間軸の各スロットに完全ハメ込み
+                # スロットごとの「純粋な稼働分数（昼休憩を除く）」の範囲を定義して、綺麗に重なり判定を行う
+                # インデックス8は昼休憩なので判定から除外
+                slot_ranges = {}
+                for s_idx in range(23):
+                    if s_idx < 8:
+                        slot_ranges[s_idx] = (s_idx * 30, (s_idx + 1) * 30)
+                    elif s_idx == 8:
+                        slot_ranges[s_idx] = (None, None) # 昼休憩用
+                    else:
+                        slot_ranges[s_idx] = ((s_idx - 1) * 30, s_idx * 30)
+
                 for job in full_schedule:
                     d_num = int(job['稼働日'].replace("日目", ""))
                     l_key = job['製造ライン']
@@ -468,20 +497,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     
                     for row_item in matrix_rows:
                         if row_item['day_num'] == d_num and row_item['line_name'] == l_key:
-                            # 14個の30分枠に対して重なりをチェック
-                            for s_idx in range(14):
-                                slot_start = s_idx * 30
-                                slot_end = slot_start + 30 if s_idx < 13 else 415.0
+                            for s_idx in range(23):
+                                if s_idx == 8:
+                                    row_item['slots'][s_idx] = "昼休憩"
+                                    continue
                                 
-                                # ジョブの時間帯が、この30分枠と1分でも重なっていれば文字をハメ込む
-                                if max(start_m, slot_start) < min(end_m, slot_end):
-                                    txt = f"{job['品目名']}\n({job['指示数量(袋)']}袋)\n"
-                                    if row_item['slots'][s_idx] == "":
-                                        row_item['slots'][s_idx] = txt
-                                    else:
-                                        row_item['slots'][s_idx] += "＋\n" + txt
+                                slot_start, slot_end = slot_ranges[s_idx]
+                                # 最後のスロットだけ端数(415分以降の残業)を考慮
+                                if s_idx == 22 and slot_end is not None:
+                                    slot_end = 660.0
+                                
+                                if slot_start is not None and slot_end is not None:
+                                    if max(start_m, slot_start) < min(end_m, slot_end):
+                                        txt = f"{job['品目名']}\n({job['指示数量(袋)']}袋)\n"
+                                        if row_item['slots'][s_idx] == "":
+                                            row_item['slots'][s_idx] = txt
+                                        else:
+                                            row_item['slots'][s_idx] += "＋\n" + txt
 
-                # エクセルデータへ展開書き出し
                 for r_item in matrix_rows:
                     ws_timeline.append([r_item['day_str'], r_item['line_disp']] + r_item['slots'])
 
@@ -489,6 +522,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 navy_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
                 zebra_fill = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
                 header_fill_tl = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
+                break_fill = PatternFill(start_color="E4DFEC", end_color="E4DFEC", fill_type="solid") # 休憩用の薄い紫
                 white_font = Font(name="Meiryo UI", size=11, bold=True, color="FFFFFF")
                 regular_font = Font(name="Meiryo UI", size=10)
                 bold_font = Font(name="Meiryo UI", size=10, bold=True)
@@ -508,54 +542,52 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             if isinstance(cell.value, (int, float)):
                                 cell.number_format = "#,##0" if isinstance(cell.value, int) else "#,##0.0"
                                 cell.alignment = Alignment(horizontal="right", vertical="center")
-                            else:
-                                cell.alignment = Alignment(horizontal="left", vertical="center")
+                            else: cell.alignment = Alignment(horizontal="left", vertical="center")
                     for col in ws.columns:
                         max_len = max([sum([2 if ord(c) > 128 else 1 for c in str(cell.value or '')]) for cell in col])
                         ws.column_dimensions[get_column_letter(col[0].column)].width = max(max_len + 3, 12)
                     ws.freeze_panes = "A2"
 
-                # 🌟 ガントチャート型タイムテーブルシート専用の超美麗装飾
+                # タイムテーブル用の装飾
                 ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]:
                     cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
-                # 「日付（A列）」を縦に4行（4号機分）ずつ綺麗に結合
                 for d in range(max_days_generated):
                     start_r = 2 + (d * 4)
                     end_r = start_r + 3
                     ws_timeline.merge_cells(start_row=start_r, start_column=1, end_row=end_r, end_column=1)
 
                 for row_idx in range(2, ws_timeline.max_row + 1):
-                    ws_timeline.row_dimensions[row_idx].height = 65  # 商品情報が綺麗に収まる絶妙な高さ
+                    ws_timeline.row_dimensions[row_idx].height = 65 
                     is_even_day = ((row_idx - 2) // 4 % 2 == 0)
                     for cell in ws_timeline[row_idx]:
                         cell.font = regular_font; cell.border = border_all
                         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                        # 各ライン（B列）をソフトブルーで強調
+                        
                         if cell.column == 2:
-                            cell.fill = header_fill_tl
+                            cell.fill = header_fill_tl; cell.font = bold_font
+                        elif cell.column == 11:  # 12:00〜13:00(昼休憩)の列（C列から数えて11列目）
+                            cell.fill = break_fill
                             cell.font = bold_font
-                        # 日付ごとに背景のゼブラをかけて、日の区切りをひと目で分かりやすく
                         elif cell.column > 2 and is_even_day:
                             cell.fill = zebra_fill
 
-                # 各列の横幅を固定調整
                 ws_timeline.column_dimensions['A'].width = 12
                 ws_timeline.column_dimensions['B'].width = 12
                 for c in range(3, ws_timeline.max_column + 1):
                     ws_timeline.column_dimensions[get_column_letter(c)].width = 24
-                ws_timeline.freeze_panes = "C2"  # 日付と号機列を固定して、右へのスクロールを快適に
+                ws_timeline.freeze_panes = "C2" 
 
                 excel_data = io.BytesIO()
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 {factory_mode}用のガントチャート計画が完了しました！以下のボタンからダウンロードしてください。")
+                st.success(f"🎉 製造計画の作成が完了しました！以下のボタンから最新指示書をダウンロードしてください。")
                 st.download_button(
-                    label=f"📊 {factory_mode} 製造指示スケジュール表(.xlsx)をダウンロード",
+                    label=f"📊 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data,
-                    file_name=f"【確定完成版】{factory_mode}_日次製造指示スケジュール表.xlsx",
+                    file_name=f"【確定完成版】日次製造指示スケジュール表.xlsx",
                     mime="application/vnd.openpyxlformats-officedocument.spreadsheetml.sheet"
                 )
 

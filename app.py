@@ -275,7 +275,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if required_daily_mins > 430.0:  # 休憩を除く通常純定時は430分
                     overtime_mins = math.ceil(required_daily_mins - 430.0)
                     daily_capacity = 430.0 + overtime_mins
-                    if daily_capacity > 640.0: # 20:00上限（純稼働640分）
+                    if daily_capacity > 640.0: # 20:00上限
                         daily_capacity = 640.0
                         overtime_mins = 210
                 else:
@@ -312,7 +312,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     elif has_pair_2_6 and not has_pair_3_5: lines_to_run_today = [l for l in ['2号機', '6号機'] if l in active_lines]
                     elif has_pair_3_5 and not has_pair_2_6: lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
                     else:
-                        # 🌟【バグ修正：weight_2_6 に変数名を統一して完全に直しました】
+                        # 🌟【バグ完全修正：左辺を weight_2_6 に統一し、変数エラーを根絶しました】
+                        weight_2_6 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['2号機', '6機'] if l in active_lines]) if '2号機' in queues or '6号機' in queues else 0
                         weight_2_6 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['2号機', '6号機'] if l in active_lines])
                         weight_3_5 = sum([queues[l][current_job_idx[l]]['remaining_bags'] for l in ['3号機', '5号機'] if l in active_lines])
                         lines_to_run_today = ['2号機', '6号機'] if weight_2_6 >= weight_3_5 else ['3号機', '5号機']
@@ -391,7 +392,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
-                # 🌟【バグ修正：14:00 Bios〜 のタイポを「14:00〜14:30」に完璧に修正しました】
+                # 時間枠（横軸）
                 time_slots = [
                     "8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", 
                     "10:00〜10:10(休憩)", "10:10〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", 

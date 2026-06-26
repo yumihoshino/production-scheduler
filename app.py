@@ -13,7 +13,7 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
 st.title("🚜 製造計画全自動スケジュールシステム (現場完全同期版)")
-st.markdown("### エクセルを置くだけで、ペア稼働・サイズ近接・1時間刻みのタイムテーブルを完全自動生成します")
+st.markdown("### エクセルを置くだけで、ペア稼働・サイズ近接・30分刻みの縦型タイムテーブルを自動生成します")
 
 st.sidebar.markdown("## 🏢 工場の選択")
 factory_mode = st.sidebar.selectbox("対象の工場を選択してください", ["本社", "関西工場"])
@@ -38,6 +38,7 @@ st.sidebar.info(
     "・最小5m3 / 基本10m3 バッチルール\n"
     "・段取り替え: 異配合時は直前と「最も近いサイズ」を優先\n"
     "・人員制約: 全稼働を最優先、不可時は[2-6ペア] [3-5ペア]で連動\n"
+    "・タイムテーブル: 縦型30分刻み高精度版\n"
     "・足切り: 欠品時を除き100袋未満は自動スキップ"
 )
 
@@ -122,7 +123,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタがシステム内に見つかりません。")
     else:
-        with st.spinner("現在、サイズ近接段取りとオペレーターペア連動を考慮して24時間時間軸パズルを演算中です..."):
+        with st.spinner("現在、30分刻みの縦型タイムラインを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込みと自動検知
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -287,7 +288,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     return (row['計画製造袋数'] / speed) * 60
                 df_final['製造所要時間_分'] = df_final.apply(calc_duration_mins, axis=1)
 
-                # 🌟【バグ修正：138行目 row['現在の在庫'] -> r['現在の在庫'] に直しました】
+                # ソート用緊急度
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                 group_urgency = df_final.groupby('中身設計コード')['緊急度'].min().to_dict()
                 df_final['グループ緊急度'] = df_final['中身設計コード'].map(group_urgency)
@@ -426,47 +427,64 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         job['指示数量(袋)'], job['製造時間(分)'], job['切り替え(分)'], job['合計拘束時間(分)'], job['備考']
                     ])
 
-                # シート③：1時間刻みタイムテーブルシート
-                ws_timeline = wb.create_sheet(title="日別時間軸タイムテーブル")
+                # 🌟【シート③：大刷新！ 30分刻み・縦スクロール型タイムテーブル】
+                ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
                 
-                time_slots = ["8:00〜", "9:00〜", "10:00〜", "11:00〜", "13:00〜", "14:00〜", "15:00〜"]
+                # 30分刻みの時間枠名義（14スロット分）
+                time_slots = [
+                    "8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", 
+                    "10:00〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", 
+                    "12:00〜12:30", "12:30〜13:00", "13:00〜13:30", "13:30〜14:00", 
+                    "14:00〜14:30", "14:30〜14:55"
+                ]
+                
+                # ヘッダーを「横軸：号機」に組み換え
+                ws_timeline.append(["稼働日", "時間帯", "NO.2 (2号機)", "NO.3 (3号機)", "NO.5 (5号機)", "NO.6 (6号機)"])
+                
                 max_days_generated = max([int(j['稼働日'].replace("日目", "")) for j in full_schedule]) if full_schedule else 1
+                line_col_map = {"2号機": 2, "3号機": 3, "5号機": 4, "6号機": 5}
                 
-                row1 = ["予備", "号機"]
-                row2 = ["", ""]
+                # 日付×時間枠の空枠マトリクスを縦に作成
+                matrix_rows = []
                 for d in range(1, max_days_generated + 1):
-                    row1.extend([f"{d}日目", "", "", "", "", "", ""])
-                    row2.extend(time_slots)
+                    for slot_idx, slot_name in enumerate(time_slots):
+                        matrix_rows.append({
+                            'day_num': d,
+                            'day_str': f"{d}日目",
+                            'slot_name': slot_name,
+                            'slot_idx': slot_idx,
+                            'cols': [""] * 4  # [2号機, 3号機, 5号機, 6号機]
+                        })
                 
-                ws_timeline.append(row1)
-                ws_timeline.append(row2)
-                
-                line_map = {"2号機": "NO.2", "3号機": "NO.3", "5号機": "NO.5", "6号機": "NO.6"}
-                timeline_rows = {l: ["", line_map[l]] + [""] * (max_days_generated * 7) for l in line_map}
-                
+                # スケジュールデータを縦型マトリクスにハメ込む
                 for job in full_schedule:
-                    d_idx = int(job['稼働日'].replace("日目", "")) - 1
+                    d_num = int(job['稼働日'].replace("日目", ""))
                     l_key = job['製造ライン']
-                    if l_key not in timeline_rows: continue
+                    if l_key not in line_col_map: continue
+                    col_offset = line_col_map[l_key] - 2
                     
                     start_m = job['開始時間_分']
                     end_m = start_m + job['製造時間(分)']
                     
-                    for slot_idx in range(7):
-                        slot_start = slot_idx * 60
-                        slot_end = slot_start + 60 if slot_idx < 6 else 415.0
+                    # 各30分枠にジョブが重なっているか判定
+                    for row_item in matrix_rows:
+                        if row_item['day_num'] != d_num: continue
+                        
+                        s_idx = row_item['slot_idx']
+                        slot_start = s_idx * 30
+                        slot_end = slot_start + 30 if s_idx < 13 else 415.0
                         
                         if max(start_m, slot_start) < min(end_m, slot_end):
-                            cell_pos = 2 + (d_idx * 7) + slot_idx
                             txt = f"{job['品目名']}\n({job['指示数量(袋)']}袋)\n"
-                            if timeline_rows[l_key][cell_pos] == "":
-                                timeline_rows[l_key][cell_pos] = txt
+                            if row_item['cols'][col_offset] == "":
+                                row_item['cols'][col_offset] = txt
                             else:
-                                timeline_rows[l_key][cell_pos] += "＋\n" + txt
-                
-                for l in ["2号機", "3号機", "5号機", "6号機"]:
-                    ws_timeline.append(timeline_rows[l])
+                                row_item['cols'][col_offset] += "＋\n" + txt
+
+                # エクセルシートへの書き出し
+                for r_item in matrix_rows:
+                    ws_timeline.append([r_item['day_str'], r_item['slot_name']] + r_item['cols'])
 
                 # スタイリングの適用
                 navy_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
@@ -478,6 +496,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 thin_side = Side(border_style="thin", color="D9D9D9")
                 border_all = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
+                # 通常シートの装飾
                 for ws in [ws_summary, ws_daily]:
                     ws.row_dimensions[1].height = 26
                     for cell in ws[1]:
@@ -498,33 +517,43 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         ws.column_dimensions[get_column_letter(col[0].column)].width = max(max_len + 3, 12)
                     ws.freeze_panes = "A2"
 
-                ws_timeline.row_dimensions[1].height = 24
-                ws_timeline.row_dimensions[2].height = 20
+                # 🌟 縦型30分テーブルシート専用の超美麗装飾
+                ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]:
                     cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
-                for cell in ws_timeline[2]:
-                    cell.fill = header_fill_tl; cell.font = bold_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
+                # 「日付」セルを縦に14行ずつマージ結合して見やすくする
                 for d in range(max_days_generated):
-                    start_col = 3 + (d * 7)
-                    ws_timeline.merge_cells(start_row=1, start_column=start_col, end_row=1, end_column=start_col+6)
+                    start_r = 2 + (d * 14)
+                    end_r = start_r + 13
+                    ws_timeline.merge_cells(start_row=start_r, start_column=1, end_row=end_r, end_column=1)
 
-                for row_idx in range(3, ws_timeline.max_row + 1):
-                    ws_timeline.row_dimensions[row_idx].height = 75 
+                for row_idx in range(2, ws_timeline.max_row + 1):
+                    ws_timeline.row_dimensions[row_idx].height = 65  # 30分内の商品情報が見える絶妙な高さ
+                    is_even_day = ((row_idx - 2) // 14 % 2 == 0)
                     for cell in ws_timeline[row_idx]:
                         cell.font = regular_font; cell.border = border_all
-                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True) 
-                
-                ws_timeline.column_dimensions['A'].width = 8
-                ws_timeline.column_dimensions['B'].width = 10
-                for c in range(3, ws_timeline.max_column + 1):
-                    ws_timeline.column_dimensions[get_column_letter(c)].width = 24
+                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        # 日付ごとに背景のゼブラをかけて1日の区切りを分かりやすくする
+                        if cell.column == 2:
+                            cell.fill = header_fill_tl
+                            cell.font = bold_font
+                        elif cell.column > 2 and is_even_day:
+                            cell.fill = zebra_fill
+
+                ws_timeline.column_dimensions['A'].width = 12
+                ws_timeline.column_dimensions['B'].width = 16
+                ws_timeline.column_dimensions['C'].width = 25
+                ws_timeline.column_dimensions['D'].width = 25
+                ws_timeline.column_dimensions['E'].width = 25
+                ws_timeline.column_dimensions['F'].width = 25
+                ws_timeline.freeze_panes = "C2"  # 日付と時間を固定してスクロール可能に
 
                 excel_data = io.BytesIO()
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 {factory_mode}用の現場完全同期計画が完了しました！以下のボタンからダウンロードしてください。")
+                st.success(f"🎉 {factory_mode}用の縦型高精度スケジュールが完了しました！以下のボタンからダウンロードしてください。")
                 st.download_button(
                     label=f"📊 {factory_mode} 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data,

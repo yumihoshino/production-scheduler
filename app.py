@@ -47,7 +47,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・誤爆防止: 🌟古い本社マスタを強制看破して排除する関西専用検問ロック搭載！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・名寄せ覚醒: 🌟ボタンを押したその場でBKコードのハッシュ辞書を生成する完全結合仕様！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -63,7 +63,7 @@ st.sidebar.info(
 )
 
 # =====================================================================
-# 🌟 最上流グローバル・セーフティ関数群
+# 🌟 最上流グローバル・独立パーサー関数群（メモリ掃除機つき）
 # =====================================================================
 
 def safe_seek(f):
@@ -156,7 +156,7 @@ def get_sp(line, vol, f_mode):
     else: return 388 if line == '1号機' else (500 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 191)) if line == '3号機' else (646 if line == '5号機' else (480 if line == '6号機' else 107))))
 
 # =====================================================================
-# 🌟 マスタスタンバイチェック
+# 🌟 マスタスタンバイ外側チェック（0.001秒の存在判定のみ）
 # =====================================================================
 
 has_local_master = os.path.exists("bom_master_local.csv") or os.path.exists("bom_master.xlsx") or os.path.exists("bom_master.csv") or ('bom_data' in st.session_state) or (file_bom is not None)
@@ -181,7 +181,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     if not file_zai or not file_gekkan:
         st.error("エラー: 必要ファイルをアップロードしてください。")
     else:
-        with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計画ファイルを出力中..."):
+        with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計算中..."):
             try:
                 df_bom = None
                 if file_bom is not None:
@@ -203,17 +203,16 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
                     except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
 
-                # 🌟【ここが真の防波堤：関西マスタ誤爆チェック検問】
-                # もし過去の古いマスタがロードされても、関西モードなのにBKコードが無ければ強制破棄！
+                # 関西マスタ誤爆チェック検問
                 if df_bom is not None and not df_bom.empty and factory_mode == "関西工場":
                     has_bk = False
                     for col in df_bom.columns:
                         if df_bom[col].astype(str).str.contains('BK').any():
                             has_bk = True; break
                     if not has_bk:
-                        df_bom = None  # 本社データの誤爆を検知して抹殺
+                        df_bom = None
 
-                # 🌟 誤爆マスタが破棄されて空(None)になった場合、ここで計画書エクセル内から100%確実に本物の関西マスタを吸い上げる！
+                # 計画書エクセル内から吸い上げ
                 if df_bom is None and file_gekkan is not None:
                     try:
                         safe_seek(file_gekkan)
@@ -233,6 +232,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     st.error("エラー: 構成表マスタが見つかりません。")
                     st.stop()
 
+                # 🌟【大復活＆位置修正】読み込まれたマスタから「その場」で爆速ハッシュ辞書を生成！
                 bom_lookup_dict = {}
                 if not df_bom.empty:
                     p_col = next((c for c in df_bom.columns if c in ['商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
@@ -242,6 +242,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if pv not in bom_lookup_dict or cv.startswith(('BH', 'BK')):
                             bom_lookup_dict[pv] = cv
 
+                # 🌟【インライン関数化】作成した最新辞書を確実に参照する名寄せ頭脳
                 def extract_content_code(item_code):
                     return bom_lookup_dict.get(str(item_code).strip(), item_code)
 
@@ -274,7 +275,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 plan_col_idx = None; actual_col_idx = None
                 for search_c in range(len(df_monthly_raw.columns)):
-                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for range(item_row_idx + 1)])
+                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])  # 👈 タイポ完全修復
                     if ('予定' in col_text or '計画' in col_text) and plan_col_idx is None: plan_col_idx = search_c
                     elif '実績' in col_text and actual_col_idx is None: actual_col_idx = search_c
 
@@ -381,7 +382,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 idx = cur_idx[line]
                                 if idx < len(queues[line]):
                                     job = queues[line][idx]
-                                    sw = 5.0 if spent > 0 and p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
+                                    sw = 5.0 if spent > 0 hover p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
                                     avail = cap_limit - spent - sw
                                     if avail <= 5.0: break
                                     
@@ -496,7 +497,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             c.font = r_font; c.border = b_all
                             if sheet==ws3:
                                 c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                                if c.column in [2,3]: c.fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"); c.font = b_font
+                                if c.column in [2,3]: c.fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
                                 elif c.column in [8,13,18]: c.fill = PatternFill(start_color="E4DFEC" if c.column==13 else "EAEAEA", end_color="E4DFEC" if c.column==13 else "EAEAEA", fill_type="solid"); c.font = b_font
                                 elif c.column>3 and is_z: c.fill = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
                             else:

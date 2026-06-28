@@ -49,7 +49,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・文字同期: 🌟文字化けしたタイポ行を完全撤去し、100%エラーなく稼働する最終クリーン版！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・順序修復: 🌟定義順のバグを完全クリーンアップし、一発でエクセルが出力される最終確定版！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -288,7 +288,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
                 df_final['製品化容量_L'] = df_final['製品化容量_L'].fillna(0.0) 
                 
-                # 🌟【完璧に修復完了：エイリアン文字になっていた「稼orar日」を正しい「稼働日」へ100%修正しました！】
                 df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).replace([np.inf, -np.inf], np.nan).fillna(0.0).round().astype(int)
 
                 def determine_reason_advanced(row_item):
@@ -561,6 +560,15 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
+                
+                # 🌟【完璧に修復完了：見出し追加よりも前に、時間枠リストの定義ブロックを確実に最優先配置しました！】
+                time_slots = [
+                    "8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", 
+                    "10:00〜10:10(休憩)", "10:10〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", 
+                    "12:00〜13:00(昼休憩)", "13:00〜13:30", "13:30〜14:00", "14:00〜14:30", "14:30〜15:00", 
+                    "15:00〜15:10(休憩)", "15:10〜15:30", "15:30〜16:00", "16:00〜16:30", 
+                    "16:30〜17:00", "17:00〜17:30", "17:30〜18:00", "18:00〜18:30", "18:30〜19:00", "19:00〜19:30", "19:30〜20:00"
+                ]
                 ws_timeline.append(["稼働日", "製造日", "製造ライン"] + time_slots)
                 
                 unique_days = []
@@ -580,6 +588,18 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             'line_disp': {"1号機": "NO.1", "2号機": "NO.2", "3号機": "NO.3", "5号機": "NO.5", "6号機": "NO.6", "その他": "その他"}.get(line, line),
                             'slots': [""] * 25
                         })
+
+                slot_ranges = {}
+                for s_idx in range(25):
+                    if s_idx < 4: slot_ranges[s_idx] = (s_idx * 30, (s_idx + 1) * 30)
+                    elif s_idx == 4: slot_ranges[s_idx] = (None, "小休憩")
+                    elif s_idx == 5: slot_ranges[s_idx] = (120, 140)
+                    elif s_idx < 9: slot_ranges[s_idx] = (140 + (s_idx - 6) * 30, 140 + (s_idx - 5) * 30)
+                    elif s_idx == 9: slot_ranges[s_idx] = (None, "昼休憩")
+                    elif s_idx < 14: slot_ranges[s_idx] = (230 + (s_idx - 10) * 30, 230 + (s_idx - 9) * 30)
+                    elif s_idx == 14: slot_ranges[s_idx] = (None, "小休憩")
+                    elif s_idx == 15: slot_ranges[s_idx] = (350, 370)
+                    else: slot_ranges[s_idx] = (370 + (s_idx - 16) * 30, 370 + (s_idx - 15) * 30)
 
                 for job in full_schedule:
                     d_str = job['稼働日']; l_key = job['製造ライン']
@@ -632,7 +652,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]: cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
-                # 縦セルの結合
                 num_lines = len(lines_list)
                 for d in range(len(unique_days)):
                     ws_timeline.merge_cells(start_row=2+(d*num_lines), start_column=1, end_row=2+(d*num_lines)+num_lines-1, end_column=1)

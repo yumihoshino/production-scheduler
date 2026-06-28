@@ -49,7 +49,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・完全修復: 🌟1行目の構文エラー(SyntaxError)を完全クリーンアップした最終確定版！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・完全修復: 🌟脱走していた容量抽出関数を最上流へロック固定した真の最終版！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -64,7 +64,11 @@ st.sidebar.info(
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
-# 複数シートから該当する計画書をすべて集めて縦に自動結合するスマート関数
+# =====================================================================
+# 🌟 グローバル・パーサー関数群（絶対に消えない最上流エリアに集約）
+# =====================================================================
+
+# ① 複数シートから該当する計画書をすべて集めて縦に自動結合する関数
 def load_excel_sheets_merged(file, keywords):
     xl = pd.ExcelFile(file)
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
@@ -85,7 +89,7 @@ def load_excel_sheets_merged(file, keywords):
             base_df = pd.concat([base_df, data_to_add], ignore_index=True)
     return base_df
 
-# 構成表マスタの変則見出しを自動検出して名寄せクリーンアップするパーサー
+# ② 構成表マスタの変則見出しを自動検出して名寄せクリーンアップする関数
 def clean_bom_master(df_raw_bom):
     if df_raw_bom is None or df_raw_bom.empty: return None
     h_row = 0
@@ -97,7 +101,17 @@ def clean_bom_master(df_raw_bom):
     df_clean.columns = [str(c).strip() for c in df_raw_bom.iloc[h_row].values]
     return df_clean
 
-# サイズ近接ソート関数
+# ③【完全復活ロック固定】特殊単位(kg)や小袋(3.6L)などの容量・重量を安全に抽出する関数
+def extract_volume_safe(name_str):
+    n_str = str(name_str)
+    match = re.search(r'(\d+(?:\.\d+)?)\s*(?:[LLｌｌＬＬ]|[kKｋＫ][gGｇＧ]?)', n_str)
+    if match:
+        try: return int(float(match.group(1)))
+        except: return 14
+    elif '特大袋' in n_str: return 55
+    else: return 14
+
+# ④ サイズ近接ソート関数
 def sort_jobs_by_size_proximity(df_line):
     unprocessed = df_line.to_dict('records')
     if not unprocessed: return []
@@ -127,6 +141,8 @@ def sort_jobs_by_size_proximity(df_line):
         for j in same_recipe_jobs: unprocessed.remove(j)
     return processed
 
+# =====================================================================
+
 # マスタ読込・自動無条件復元ロジック
 df_bom = None
 if os.path.exists("bom_master_local.csv"):
@@ -148,7 +164,7 @@ if file_bom is not None:
         df_bom.to_csv("bom_master_local.csv", index=False, encoding='utf-8')
         st.session_state['bom_data'] = df_bom
 
-# 🌟【超大進化：もしマスタ未登録でも、計画書ファイル(②)を置いた瞬間に「ﾏｽﾀ」シートがあれば全自動で自動吸い上げ！】
+# もしマスタ未登録でも、計画書ファイル(②)を置いた瞬間に「ﾏｽﾀ」シートがあれば全自動で吸い上げる
 if df_bom is None and file_gekkan is not None:
     try:
         xl_gekkan_test = pd.ExcelFile(file_gekkan)
@@ -185,9 +201,8 @@ else: st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
 
 if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     if not file_zai or not file_gekkan:
-        st.error(f"エラー: 必要ファイルをアップロードしてください。")
+        st.error("エラー: 必要ファイルをアップロードしてください。")
     else:
-        # 防弾セーフティ：ボタン押下時にも、計画書ファイル内からマスタシートを重ねて自動吸い上げを実行
         if df_bom is None and file_gekkan is not None:
             try:
                 xl_g = pd.ExcelFile(file_gekkan)
@@ -200,7 +215,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
         if df_bom is None:
             st.error("エラー: 構成表マスタが見つかりません。")
         else:
-            with st.spinner(f"現在、計画書内のマスタを自動スキャンし、最新巡航スピードで最適化パズルを解いています..."):
+            with st.spinner("現在、計画書内のマスタをスキャンし、最新巡航スピードで最適化パズルを解いています..."):
                 try:
                     # 1. 在庫推移リストの読み込み
                     df_zai_raw = load_excel_sheets_merged(file_zai, ["在庫推移リスト", "在庫推移"])

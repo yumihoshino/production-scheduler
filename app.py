@@ -170,7 +170,7 @@ if df_bom is None and file_gekkan is not None:
                 st.session_state['bom_data'] = df_bom
     except: pass
 
-# ⚡【超高速化】マスタをO(1)アクセスの高速辞書に一発コンパイル！
+# ⚡【超高速化】マスタをO(1)アクセスの高速辞書に一発コンパイル
 bom_lookup_dict = {}
 if df_bom is not None and not df_bom.empty:
     p_col = next((c for c in df_bom.columns if c in ['商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
@@ -311,15 +311,16 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     for l in queues:
                         for j in queues[l]: j['rem'] = j['計画製造袋数']
                     
+                    # 🌟【最重要修正：内包表記でスコープエラーにならないよう、応援判定関数をループの上流へ確実に固定配置！】
+                    def job_can_support(l_key, job_item):
+                        if factory_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
+                        else: return (l_key == '5号機' and job_item['容量_L'] <= 14 or l_key == '2号機' and job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']
+
                     loop_d = get_next_w_date(start_date)
                     day_cnt = 1; sched = []
                     
                     while True:
                         active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and (job_can_support(l, j)) for ol in lines_list if ol != l for j in queues[ol])]
-                        def job_can_support(l_key, job_item):
-                            if factory_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
-                            else: return (l_key == '5号機' and job_item['容量_L'] <= 14 or l_key == '2号機' and job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']
-
                         if not active: break
                         
                         run_today = active if factory_mode == "関西工場" else ([l for l in ['2号機', '3号機', '5号機', '6号機'] if l in active] if len(active) == 4 else ([l for l in ['3号機', '5号機'] if l in active] if any(l in active for l in ['3号機', '5号機']) and ('5号機' in active or not any(l in active for l in ['2号機', '6号機'])) else [l for l in ['2号機', '6号機'] if l in active]))
@@ -354,7 +355,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         spent += sw + dur; job['rem'] -= b_make
                                         p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
                                 else:
-                                    # 応援探す
                                     sup_found = False
                                     for o_line in lines_list:
                                         if o_line == line: continue

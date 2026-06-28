@@ -49,7 +49,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機\n・仕事融通: 5号機等の高速機が自動応援"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・新機能: 🌟「通常計画」と「小袋計画」の複数シートを全自動で検知して自動結合！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・新機能: 🌟詳細レポート(29)から逆算した最新の巡航スピードを完全移植！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -63,14 +63,13 @@ st.sidebar.info(
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
-# 🌟【大進化：複数シートから該当する計画書をすべて集めて縦に自動結合するスマート関数】
+# 複数シートから目的のシートを自動検知して読み込む関数
 def load_excel_sheets_merged(file, keywords):
     xl = pd.ExcelFile(file)
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
     if not matched_sheets:
         return pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None)
     
-    # 1枚目のシートをベースとして読み込む
     base_df = pd.read_excel(xl, sheet_name=matched_sheets[0], header=None)
     
     item_row_idx = 1
@@ -80,7 +79,6 @@ def load_excel_sheets_merged(file, keywords):
             item_row_idx = i
             break
             
-    # 2枚目以降のシート（例：小袋計画シート）があれば見出しから下のデータ行を縦に合体
     for sheet in matched_sheets[1:]:
         add_df = pd.read_excel(xl, sheet_name=sheet, header=None)
         if len(add_df) > item_row_idx + 1:
@@ -135,6 +133,15 @@ if file_bom is not None:
     else: df_bom = load_excel_sheets_merged(file_bom, ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"])
     st.session_state['bom_data'] = df_bom
 
+def extract_content_code(item_code):
+    if df_bom is None: return item_code
+    parent_col = "商品CODE" if "商品CODE" in df_bom.columns else (df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
+    child_col = "配合CODE" if "配合CODE" in df_bom.columns else df_bom.columns[0]
+    sub_bom = df_bom[df_bom[parent_col].astype(str).str.strip() == item_code]
+    if sub_bom.empty: return item_code
+    bh_items = sub_bom[sub_bom[child_col].astype(str).str.startswith('BH')]
+    return bh_items[child_col].iloc[0] if not bh_items.empty else sub_bom[child_col].iloc[0]
+
 if df_bom is not None: st.sidebar.success("🟢 構成表マスタ: 読込済み (入力不要)")
 else: st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
 
@@ -144,7 +151,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner(f"現在、{factory_mode}の「通常＋小袋」複数計画データをマージして組み立てています..."):
+        with st.spinner(f"現在、関西工場の最新巡航スピードデータを同期させてパズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込み
                 df_zai_raw = load_excel_sheets_merged(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -177,7 +184,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['現在の在庫'] = pd.to_numeric(df_zai_in_zai[base_date], errors='coerce')
                 df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫']).apply(lambda x: max(0, x))
 
-                # 2. 🌟【大進化：関西工場の月間製造計画書（通常と小袋）を自動マージして読み込み】
+                # 2. 月間製造計画書の読み込み
                 df_monthly_raw = load_excel_sheets_merged(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"])
                 item_row_idx = 1
                 for i in range(min(15, len(df_monthly_raw))):
@@ -278,6 +285,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         else: return 'その他'
                     df_final['製造ライン'] = df_final.apply(determine_kansai_line, axis=1)
 
+                # 🌟【最新アップデート：レポート（29）から導き出された最も正確な製造スピードを完全同期】
                 def calc_duration_mins_by_line(line, vol, bags):
                     if bags <= 0: return 0.0
                     if factory_mode == "本社":
@@ -286,12 +294,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         elif line == '5号機': speed = 730 if vol in [12, 14] else 650
                         else: speed = 260
                     else:
-                        if line == '1号機': speed = 405
-                        elif line == '2号機': speed = 470
-                        elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 180)
-                        elif line == '5号機': speed = 700
-                        elif line == '6号機': speed = 588
-                        else: speed = 125
+                        # 関西工場の実績レポート（29）解析による超高精度巡航実力値
+                        if line == '1号機': speed = 388   # 大袋用実績スピード
+                        elif line == '2号機': speed = 500  # 中袋用実績スピード
+                        elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 190) # 堆肥・腐葉土実績
+                        elif line == '5号機': speed = 646  # 小袋用実績
+                        elif line == '6号機': speed = 480  # 高速ライン実績
+                        else: speed = 107                  # その他（4号機半自動実績ベース）
                     return (bags / speed) * 60
 
                 df_final['製造所要時間_分'] = df_final.apply(lambda r: calc_duration_mins_by_line(r['製造ライン'], r['容量_L'], r['計画製造袋数']), axis=1)
@@ -383,12 +392,12 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         elif line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
                                         else: speed_per_min = 260 / 60
                                     else:
-                                        if line == '1号機': speed_per_min = 405 / 60
-                                        elif line == '2号機': speed_per_min = 470 / 60
-                                        elif line == '3号機': speed_per_min = (70 if vol == 55 else (100 if vol == 30 else 180)) / 60
-                                        elif line == '5号機': speed_per_min = 700 / 60
-                                        elif line == '6号機': speed_per_min = 588 / 60
-                                        else: speed_per_min = 125 / 60
+                                        if line == '1号機': speed_per_min = 388 / 60
+                                        elif line == '2号機': speed_per_min = 500 / 60
+                                        elif line == '3号機': speed_per_min = (70 if vol == 55 else (100 if vol == 30 else 190)) / 60
+                                        elif line == '5号機': speed_per_min = 646 / 60
+                                        elif line == '6号機': speed_per_min = 480 / 60
+                                        else: speed_per_min = 107 / 60
                                     
                                     max_bags_today = available_time * speed_per_min
                                     start_time_current = time_spent + switch_time
@@ -450,7 +459,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                     else: speed_per_min = 400 / 60
                                                 else:
                                                     if line == '5号機': speed_per_min = 700 / 60
-                                                    else: speed_per_min = 470 / 60
+                                                    else: speed_per_min = 500 / 60
                                                 
                                                 max_bags_today = available_time * speed_per_min
                                                 start_time_current = time_spent + switch_time
@@ -605,6 +614,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]: cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
+                # 縦セルの結合
                 num_lines = len(lines_list)
                 for d in range(len(unique_days)):
                     ws_timeline.merge_cells(start_row=2+(d*num_lines), start_column=1, end_row=2+(d*num_lines)+num_lines-1, end_column=1)
@@ -629,7 +639,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 お待たせいたしました！関西工場の『本物の実力スピード』を完全同期したスケジュール指示書が完成しました！")
+                st.success(f"🎉 お待たせいたしました！関西工場の『最新巡航スピード』を完全同期したスケジュール指示書が完成しました！")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
                     data=excel_data, file_name=f"【確定完成版】{factory_mode}_{target_month}度_日次指示スケジュール表.xlsx",

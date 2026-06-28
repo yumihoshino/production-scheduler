@@ -49,7 +49,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・コード防波堤: 🌟関西工場の在庫推移表にある【Hから始まる商品コード】を全自動で完全無視・除外！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・コード防波堤: 関西工場の在庫推移表にある【Hから始まる商品コード】を全自動で完全無視・除外！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -58,6 +58,7 @@ st.sidebar.info(
     f"・対象月度: {target_month}度計画\n"
     f"・開始日: {start_date.strftime('%Y/%m/%d')}\n"
     f"{rule_info}\n"
+    "・永続ストレージ: 🌟一度入れたマスタデータはリロードしても消えずに自動復元されます\n"
     "・残業最適化: 労務管理優先、必ず30分刻みジャストで終了探索\n"
     "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
@@ -114,9 +115,12 @@ def sort_jobs_by_size_proximity(df_line):
         for j in same_recipe_jobs: unprocessed.remove(j)
     return processed
 
-# マスタ読込ロジック
+# 🌟【マスタ読込・自動無条件復元ロジック（最優先で永続ファイルをスキャンします）】
 df_bom = None
-if os.path.exists("bom_master.xlsx"): df_bom = pd.read_excel("bom_master.xlsx")
+if os.path.exists("bom_master_local.csv"):
+    try: df_bom = pd.read_csv("bom_master_local.csv", encoding='utf-8')
+    except UnicodeDecodeError: df_bom = pd.read_csv("bom_master_local.csv", encoding='cp932')
+elif os.path.exists("bom_master.xlsx"): df_bom = pd.read_excel("bom_master.xlsx")
 elif os.path.exists("bom_master.csv"):
     try: df_bom = pd.read_csv("bom_master.csv", encoding='utf-8')
     except UnicodeDecodeError: df_bom = pd.read_csv("bom_master.csv", encoding='cp932')
@@ -128,7 +132,11 @@ if file_bom is not None:
         except UnicodeDecodeError:
             file_bom.seek(0); df_bom = pd.read_csv(file_bom, encoding='cp932')
     else: df_bom = load_excel_sheets_merged(file_bom, ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"])
-    st.session_state['bom_data'] = df_bom
+    
+    # 🌟【最重要：リロード・セッション切れ対策としてサーバー上にローカルファイルとして永続保存】
+    if df_bom is not None:
+        df_bom.to_csv("bom_master_local.csv", index=False, encoding='utf-8')
+        st.session_state['bom_data'] = df_bom
 
 def extract_content_code(item_code):
     if df_bom is None: return item_code
@@ -219,7 +227,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_fixed['品目名'] = df_zai_fixed['品目名'].ffill().astype(str).str.strip()
                 df_zai_fixed['安全在庫数'] = df_zai_fixed['安全在庫数'].ffill()
 
-                df_zai_in_zai = df_zai_fixed[df_zai_fixed['種類'] == 'In' or df_zai_fixed['種類'] == '在'].copy()
                 df_zai_in_zai = df_zai_fixed[df_zai_fixed['種類'] == '在'].copy()
                 df_zai_in_zai['安全在庫数'] = pd.to_numeric(df_zai_in_zai['安全在庫数'], errors='coerce')
                 date_cols = [c for c in df_zai_in_zai.columns if '(日)' in str(c)]
@@ -274,7 +281,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 for code in all_codes:
                     if code in ['合計', 'nan', '商品CD', '品目コード', 'None', '商品CODE']: continue
                     
-                    # 🌟【新機能：関西工場モードのときだけ、Hから始まる本社商品コードを一発で完全無視して除外する防波堤ルール】
+                    # 関西工場モードのときだけ、Hから始まる本社商品コードを一発で完全無視して除外する防波堤ルール
                     if factory_mode == "関西工場" and str(code).startswith('H'):
                         continue
                         
@@ -671,10 +678,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 お待たせいたしました！【号機別×商品別】の動的実績解析パズルエンジンが完全に稼働しました！")
+                st.success(f"🎉 お待たせいたしました！関西工場の『最新巡航スピード』を完全同期したスケジュール指示書が完成しました！")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
-                    data=excel_data, file_name=f"【確定完成版】{factory_mode}_{target_month}度_動的実績連動スケジュール表.xlsx",
+                    data=excel_data, file_name=f"【確定完成版】{factory_mode}_{target_month}度_日次指示スケジュール表.xlsx",
                     mime="application/vnd.openpyxlformats-officedocument.spreadsheetml.sheet"
                 )
             except Exception as e: st.error(f"エラーが発生しました。詳細: {str(e)}")

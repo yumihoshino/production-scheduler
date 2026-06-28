@@ -46,7 +46,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・高速化: 🌟ボタン即時描画の瞬間スタンバイ仕様！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・高速化: 🌟全関数を最上流グローバルへ固定した完全確定版！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -62,7 +62,7 @@ st.sidebar.info(
 )
 
 # =====================================================================
-# 🌟 高速パーサー関数群
+# 🌟 最上流グローバル関数エリア（スコープエラーを100%封じる鉄壁配置）
 # =====================================================================
 
 def safe_seek(f):
@@ -131,9 +131,21 @@ def sort_jobs_by_size_proximity(df_line):
         for j in same_recipe_jobs: unprocessed.remove(j)
     return processed
 
+def job_can_support(l_key, job_item, f_mode):
+    if f_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
+    else: return (l_key == '5号機' and job_item['容量_L'] <= 14 or l_key == '2号機' and job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']
+
+def get_next_w_date(cur, holidays_list):
+    nd = cur
+    while nd.weekday() >= 5 or nd in holidays_list: nd += datetime.timedelta(days=1)
+    return nd
+
+def get_sp(line, vol, f_mode):
+    if f_mode == "本社": return 400 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 250)) if line == '3号機' else ((730 if vol in [12, 14] else 650) if line == '5号機' else 260))
+    else: return 388 if line == '1号機' else (500 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 191)) if line == '3号機' else (646 if line == '5号機' else (480 if line == '6号機' else 107))))
+
 # =====================================================================
-# 🌟【超高速化の核心】グローバルスコープでの「重いエクセル解凍」を完全禁止！
-# ページを開いた時は、ファイルの「存在チェック（0.0001秒）」だけを行う
+# 🌟 マスタスタンバイチェック
 # =====================================================================
 
 has_local_master = os.path.exists("bom_master_local.csv") or os.path.exists("bom_master.xlsx") or os.path.exists("bom_master.csv") or ('bom_data' in st.session_state) or (file_bom is not None)
@@ -160,7 +172,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     else:
         with st.spinner("⚡ 裏側でマスタを展開し、ハッシュエンジンで爆速計算中..."):
             try:
-                # 🌟 ここで初めてマスタデータを実際に解凍して読み込む！
                 df_bom = None
                 if file_bom is not None:
                     safe_seek(file_bom)
@@ -305,11 +316,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 else:
                     df_final['製造ライン'] = df_final.apply(lambda r: '3号機' if any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ'] else ('5号機' if r['容量_L'] <= 12 else ('1号機' if r['容量_L'] >= 25 else ('6号機' if r['容量_L'] <= 20 else '2号機'))), axis=1)
 
-                def get_sp(line, vol):
-                    if factory_mode == "本社": return 400 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 250)) if line == '3号機' else ((730 if vol in [12, 14] else 650) if line == '5号機' else 260))
-                    else: return 388 if line == '1号機' else (500 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 191)) if line == '3号機' else (646 if line == '5号機' else (480 if line == '6号機' else 107))))
-
-                df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
+                df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode)) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                 df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
 
@@ -318,26 +325,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 lines_list = ["1号機", "2号機", "3号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機"]
                 queues_base = {line: sort_jobs_by_size_proximity(df_final_sorted[df_final_sorted['製造ライン'] == line]) for line in lines_list}
 
-                def get_next_w_date(cur):
-                    nd = cur
-                    while nd.weekday() >= 5 or nd in holidays_input: nd += datetime.timedelta(days=1)
-                    return nd
-
                 def run_sim(ov_mins):
                     queues = copy.deepcopy(queues_base)
                     cur_idx = {l: 0 for l in queues}
                     for l in queues:
                         for j in queues[l]: j['rem'] = j['計画製造袋数']
-                    
-                    def job_can_support(l_key, job_item):
-                        if factory_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
-                        else: return (l_key == '5号機' and job_item['容量_L'] <= 14 or l_key == '2号機' and job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']
 
-                    loop_d = get_next_w_date(start_date)
+                    loop_d = get_next_w_date(start_date, holidays_input)
                     day_cnt = 1; sched = []
                     
                     while True:
-                        active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and (job_can_support(l, j)) for ol in lines_list if ol != l for j in queues[ol])]
+                        active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and job_can_support(l, j, factory_mode) for ol in lines_list if ol != l for j in queues[ol])]
                         if not active: break
                         
                         run_today = active if factory_mode == "関西工場" else ([l for l in ['2号機', '3号機', '5号機', '6号機'] if l in active] if len(active) == 4 else ([l for l in ['3号機', '5号機'] if l in active] if any(l in active for l in ['3号機', '5号機']) and ('5号機' in active or not any(l in active for l in ['2号機', '6号機'])) else [l for l in ['2号機', '6号機'] if l in active]))
@@ -356,7 +354,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     avail = cap_limit - spent - sw
                                     if avail <= 5.0: break
                                     
-                                    sp_min = get_sp(line, job['容量_L']) / 60
+                                    sp_min = get_sp(line, job['容量_L'], factory_mode) / 60
                                     max_b = avail * sp_min
                                     
                                     if job['rem'] <= max_b:
@@ -376,7 +374,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     for o_line in lines_list:
                                         if o_line == line: continue
                                         for job in queues[o_line]:
-                                            if job['rem'] > 0 and job_can_support(line, job):
+                                            if job['rem'] > 0 and job_can_support(line, job, factory_mode):
                                                 sw = 10.0; avail = cap_limit - spent - sw
                                                 if avail <= 5.0: break
                                                 sp_min = (646 if line == '5号機' else 500) / 60 if factory_mode == "関西工場" else ((730 if job['容量_L'] in [12, 14] else 650) if line == '5号機' else 400) / 60
@@ -393,7 +391,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                     spent += sw + dur; job['rem'] -= b_make; sup_found = True; p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
                                         if sup_found: break
                                     if not sup_found: break
-                        loop_d = get_next_w_date(loop_d + datetime.timedelta(days=1))
+                        loop_d = get_next_w_date(loop_d + datetime.timedelta(days=1), holidays_input)
                         day_cnt += 1
                         if day_cnt > 45: break
                     return sched, day_cnt - 1

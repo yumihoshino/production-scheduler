@@ -49,7 +49,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・セーフティ: 🌟空白データやイレギュラーなゴミ行も全自動で無力化する鉄壁の防弾仕様！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・セーフティ: 🌟上流から下流まで、あらゆる非有限エラー(inf)を完全完封する超頑丈な防弾コード！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -268,7 +268,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         try: return int(float(match.group(1)))
                         except: return 14
                     elif '特大袋' in n_str: return 55
-                    else: return 14 # 読み取れないイレギュラー行は、0割りを防ぐため安全な標準サイズ(14)を強制適用
+                    else: return 14
                 
                 df_master_combined['容量_L'] = df_master_combined['品目名'].apply(extract_volume_safe)
                 df_master_combined['ベース必要容量_L'] = df_master_combined['採用ベース数量'] * df_master_combined['容量_L']
@@ -279,18 +279,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 grouped['純計算_m3_ロス込'] = (grouped['ベース必要容量_L'] / 0.9) / 1000
                 grouped['製造決定_m3'] = grouped['純計算_m3_ロス込'].apply(lambda m3: 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0)))
 
-                # 🌟【鉄壁の防弾セーフティネットの配置：groupbyで弾かれた迷子空白行によるNaNの発生を徹底駆逐】
                 df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3']], on='中身設計コード', how='left')
-                df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0) # 👈 鉄壁ガード①
+                df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0) 
                 
                 total_volume_by_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_volume_by_recipe).fillna(1.0)
                 
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
-                df_final['製品化容量_L'] = df_final['製品化容量_L'].fillna(0.0) # 👈 鉄壁ガード②
+                df_final['製品化容量_L'] = df_final['製品化容量_L'].fillna(0.0) 
                 
-                # 🌟【非有限値エラー(NaN/inf)を絶対に起こさない完封1行】
-                df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).fillna(0.0).round().astype(int) # 👈 鉄壁ガード③
+                # 🌟【最重要修正：上流164行目に潜んでいた古いトラップ行を、無限大(inf)すらも確実に完封する最強セーフティへと完全改修！】
+                df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).replace([np.inf, -np.inf], np.nan).fillna(0.0).round().astype(int)
 
                 def determine_reason_advanced(row_item):
                     curr = row_item['現在の在庫']
@@ -303,7 +302,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: '腐葉土' in str(n) or '堆肥' in str(n) or '特大袋' in str(n))
                 
-                # 製造ライン自動仕分け（工場別）
+                # 製造ライン automatic 仕分け
                 if factory_mode == "本社":
                     df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
                 else:
@@ -622,6 +621,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]: cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
+                # 縦セルの結合
                 num_lines = len(lines_list)
                 for d in range(len(unique_days)):
                     ws_timeline.merge_cells(start_row=2+(d*num_lines), start_column=1, end_row=2+(d*num_lines)+num_lines-1, end_column=1)

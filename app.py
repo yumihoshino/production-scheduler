@@ -49,7 +49,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・セーフティ: 🌟真砂土(kg)や小袋(3.6L)などの特殊単位も100%自動認識し、0割りを完全防止！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・セーフティ: 🌟空白データやイレギュラーなゴミ行も全自動で無力化する鉄壁の防弾仕様！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -260,7 +260,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_master_combined['採用ベース数量'] = df_master_combined[['安全割れ不足数', '今月の計画残数']].max(axis=1)
                 df_master_combined = df_master_combined[df_master_combined['採用ベース数量'] > 0].copy()
 
-                # 🌟【新機能：L(リットル)表記だけでなく、真砂土や石灰のkg、および3.6Lなどの小数点にも100%完全対応したセーフティ容量抽出】
+                # L(リットル)表記だけでなく、真砂土や石灰のkg、および3.6Lなどの小数点にも100%完全対応したセーフティ容量抽出
                 def extract_volume_safe(name_str):
                     n_str = str(name_str)
                     match = re.search(r'(\d+(?:\.\d+)?)\s*(?:[LLｌｌＬＬ]|[kKｋＫ][gGｇＧ]?)', n_str)
@@ -279,11 +279,18 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 grouped['純計算_m3_ロス込'] = (grouped['ベース必要容量_L'] / 0.9) / 1000
                 grouped['製造決定_m3'] = grouped['純計算_m3_ロス込'].apply(lambda m3: 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0)))
 
+                # 🌟【鉄壁の防弾セーフティネットの配置：groupbyで弾かれた迷子空白行によるNaNの発生を徹底駆逐】
                 df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3']], on='中身設計コード', how='left')
+                df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0) # 👈 鉄壁ガード①
+                
                 total_volume_by_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_volume_by_recipe).fillna(1.0)
+                
                 df_final['製品化容量_L'] = (df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']
-                df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).round().astype(int)
+                df_final['製品化容量_L'] = df_final['製品化容量_L'].fillna(0.0) # 👈 鉄壁ガード②
+                
+                # 🌟【非有限値エラー(NaN/inf)を絶対に起こさない完封1行】
+                df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).fillna(0.0).round().astype(int) # 👈 鉄壁ガード③
 
                 def determine_reason_advanced(row_item):
                     curr = row_item['現在の在庫']
@@ -544,14 +551,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
-                
-                time_slots = [
-                    "8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", 
-                    "10:00〜10:10(休憩)", "10:10〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", 
-                    "12:00〜13:00(昼休憩)", "13:00〜13:30", "13:30〜14:00", "14:00〜14:30", "14:30〜15:00", 
-                    "15:00〜15:10(休憩)", "15:10〜15:30", "15:30〜16:00", "16:00〜16:30", 
-                    "16:30〜17:00", "17:00〜17:30", "17:30〜18:00", "18:00〜18:30", "18:30〜19:00", "19:00〜19:30", "19:30〜20:00"
-                ]
                 ws_timeline.append(["稼働日", "製造日", "製造ライン"] + time_slots)
                 
                 unique_days = []

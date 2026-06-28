@@ -11,7 +11,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
-# 画面のデザイン設定
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
 st.title("🚜 製造計画全自動スケジュールシステム (カレンダー完全同期版)")
@@ -47,7 +46,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・高速化: 🌟ハッシュ辞書インデックスを搭載し、計算速度を従来の数十倍にブースト！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・高速化: 🌟ボタン即時描画の瞬間スタンバイ仕様！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -56,14 +55,14 @@ st.sidebar.info(
     f"・対象月度: {target_month}度計画\n"
     f"・開始日: {start_date.strftime('%Y/%m/%d')}\n"
     f"{rule_info}\n"
-    "・永続ストレージ: 一度入れたマスタデータはリロードしても消えずに自動復元されます\n"
+    "・永続ストレージ: 一度入れたマスタデータは裏で自動保存されます\n"
     "・残業最適化: 労務管理優先、必ず30分刻みジャストで終了探索\n"
     "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
 # =====================================================================
-# 🌟 高速・安全パーサー関数群（フリーズ防止のシオリ位置リセット機能付き）
+# 🌟 高速パーサー関数群
 # =====================================================================
 
 def safe_seek(f):
@@ -76,14 +75,12 @@ def load_excel_sheets_merged(file, keywords):
     if not matched_sheets:
         safe_seek(file)
         return pd.read_excel(file, sheet_name=0, header=None)
-    
     base_df = pd.read_excel(xl, sheet_name=matched_sheets[0], header=None)
     item_row_idx = 1
     for i in range(min(15, len(base_df))):
         row_vals = [str(v).strip() for v in base_df.iloc[i].values]
         if any(k in row_vals for k in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE']):
             item_row_idx = i; break
-            
     for sheet in matched_sheets[1:]:
         add_df = pd.read_excel(xl, sheet_name=sheet, header=None)
         if len(add_df) > item_row_idx + 1:
@@ -135,67 +132,87 @@ def sort_jobs_by_size_proximity(df_line):
     return processed
 
 # =====================================================================
-# 🌟 マスタ読込 ＆ 爆速ハッシュインデックス生成エンジン
+# 🌟【超高速化の核心】グローバルスコープでの「重いエクセル解凍」を完全禁止！
+# ページを開いた時は、ファイルの「存在チェック（0.0001秒）」だけを行う
 # =====================================================================
 
-df_bom = None
-if os.path.exists("bom_master_local.csv"):
-    try: df_bom = pd.read_csv("bom_master_local.csv", encoding='utf-8')
-    except: df_bom = pd.read_csv("bom_master_local.csv", encoding='cp932')
-elif os.path.exists("bom_master.xlsx"): 
-    df_bom = clean_bom_master(pd.read_excel("bom_master.xlsx", header=None))
-elif 'bom_data' in st.session_state: df_bom = st.session_state['bom_data']
+has_local_master = os.path.exists("bom_master_local.csv") or os.path.exists("bom_master.xlsx") or os.path.exists("bom_master.csv") or ('bom_data' in st.session_state) or (file_bom is not None)
 
-if file_bom is not None:
-    safe_seek(file_bom)
-    if file_bom.name.endswith('.csv'):
-        try: df_bom = clean_bom_master(pd.read_csv(file_bom, encoding='utf-8', header=None))
-        except:
-            safe_seek(file_bom)
-            df_bom = clean_bom_master(pd.read_csv(file_bom, encoding='cp932', header=None))
-    else: df_bom = clean_bom_master(load_excel_sheets_merged(file_bom, ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"]))
-    if df_bom is not None:
-        df_bom.to_csv("bom_master_local.csv", index=False, encoding='utf-8')
-        st.session_state['bom_data'] = df_bom
-
-if df_bom is None and file_gekkan is not None:
+has_master_in_gekkan = False
+if not has_local_master and file_gekkan is not None:
     try:
         safe_seek(file_gekkan)
-        xl_test = pd.ExcelFile(file_gekkan)
-        m_sheets = [s for s in xl_test.sheet_names if any(k in s for k in ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"])]
-        if m_sheets:
-            df_bom = clean_bom_master(pd.read_excel(xl_test, sheet_name=m_sheets[0], header=None))
-            if df_bom is not None:
-                df_bom.to_csv("bom_master_local.csv", index=False, encoding='utf-8')
-                st.session_state['bom_data'] = df_bom
+        xl_peek = pd.ExcelFile(file_gekkan)
+        if any(any(k in s for k in ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"]) for s in xl_peek.sheet_names):
+            has_master_in_gekkan = True
     except: pass
 
-# ⚡【超高速化】マスタをO(1)アクセスの高速辞書に一発コンパイル
-bom_lookup_dict = {}
-if df_bom is not None and not df_bom.empty:
-    p_col = next((c for c in df_bom.columns if c in ['商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
-    c_col = next((c for c in df_bom.columns if c in ['配合CODE', '配合コード', '配合CD', '中身コード']), df_bom.columns[0])
-    for _, r in df_bom.iterrows():
-        pv = str(r[p_col]).strip(); cv = str(r[c_col]).strip()
-        if pv not in bom_lookup_dict or cv.startswith(('BH', 'BK')):
-            bom_lookup_dict[pv] = cv
-
-def extract_content_code(item_code):
-    return bom_lookup_dict.get(str(item_code).strip(), item_code)
-
-if df_bom is not None: st.sidebar.success("🟢 構成表マスタ: 読込済み (入力不要)")
-else: st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
+if has_local_master or has_master_in_gekkan:
+    st.sidebar.success("🟢 構成表マスタ: 読込済み (スタンバイOK)")
+else:
+    st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
 
 # =====================================================================
 
 if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     if not file_zai or not file_gekkan:
         st.error("エラー: 必要ファイルをアップロードしてください。")
-    elif df_bom is None:
-        st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner("⚡ ハッシュ辞書エンジンをフル回転させて爆速計算中..."):
+        with st.spinner("⚡ 裏側でマスタを展開し、ハッシュエンジンで爆速計算中..."):
             try:
+                # 🌟 ここで初めてマスタデータを実際に解凍して読み込む！
+                df_bom = None
+                if file_bom is not None:
+                    safe_seek(file_bom)
+                    if file_bom.name.endswith('.csv'):
+                        try: df_bom = clean_bom_master(pd.read_csv(file_bom, encoding='utf-8', header=None))
+                        except:
+                            safe_seek(file_bom)
+                            df_bom = clean_bom_master(pd.read_csv(file_bom, encoding='cp932', header=None))
+                    else: df_bom = clean_bom_master(load_excel_sheets_merged(file_bom, ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"]))
+                elif 'bom_data' in st.session_state:
+                    df_bom = st.session_state['bom_data']
+                elif os.path.exists("bom_master_local.csv"):
+                    try: df_bom = pd.read_csv("bom_master_local.csv", encoding='utf-8')
+                    except: df_bom = pd.read_csv("bom_master_local.csv", encoding='cp932')
+                elif os.path.exists("bom_master.xlsx"):
+                    df_bom = clean_bom_master(pd.read_excel("bom_master.xlsx", header=None))
+                elif os.path.exists("bom_master.csv"):
+                    try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
+                    except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
+
+                if df_bom is None and file_gekkan is not None:
+                    try:
+                        safe_seek(file_gekkan)
+                        xl_g = pd.ExcelFile(file_gekkan)
+                        m_sheets = [s for s in xl_g.sheet_names if any(k in s for k in ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"])]
+                        if m_sheets:
+                            df_bom = clean_bom_master(pd.read_excel(xl_g, sheet_name=m_sheets[0], header=None))
+                    except: pass
+
+                if df_bom is not None:
+                    try:
+                        df_bom.to_csv("bom_master_local.csv", index=False, encoding='utf-8')
+                        st.session_state['bom_data'] = df_bom
+                    except: pass
+
+                if df_bom is None:
+                    st.error("エラー: 構成表マスタが見つかりません。")
+                    st.stop()
+
+                bom_lookup_dict = {}
+                if not df_bom.empty:
+                    p_col = next((c for c in df_bom.columns if c in ['商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
+                    c_col = next((c for c in df_bom.columns if c in ['配合CODE', '配合コード', '配合CD', '中身コード']), df_bom.columns[0])
+                    for _, r in df_bom.iterrows():
+                        pv = str(r[p_col]).strip(); cv = str(r[c_col]).strip()
+                        if pv not in bom_lookup_dict or cv.startswith(('BH', 'BK')):
+                            bom_lookup_dict[pv] = cv
+
+                def extract_content_code(item_code):
+                    return bom_lookup_dict.get(str(item_code).strip(), item_code)
+
+                # --- 在庫推移リスト読み込み ---
                 df_zai_raw = load_excel_sheets_merged(file_zai, ["在庫推移リスト", "在庫推移"])
                 header_idx = next((i for i in range(len(df_zai_raw)) if any(kw in [str(v).strip() for v in df_zai_raw.iloc[i].values] for kw in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE'])), None)
                 if header_idx is None: st.error("エラー: 見出し列が見つかりません。"); st.stop()
@@ -215,6 +232,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['現在の在庫'] = pd.to_numeric(df_zai_in_zai[base_date], errors='coerce')
                 df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫']).apply(lambda x: max(0, x))
 
+                # --- 月間計画書読み込み ---
                 df_monthly_raw = load_excel_sheets_merged(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"])
                 item_row_idx = next((i for i in range(min(15, len(df_monthly_raw))) if any(kw in [str(v).strip() for v in df_monthly_raw.iloc[i].values] for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ', '商品CODE'])), 1)
 
@@ -311,7 +329,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     for l in queues:
                         for j in queues[l]: j['rem'] = j['計画製造袋数']
                     
-                    # 🌟【最重要修正：内包表記でスコープエラーにならないよう、応援判定関数をループの上流へ確実に固定配置！】
                     def job_can_support(l_key, job_item):
                         if factory_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
                         else: return (l_key == '5号機' and job_item['容量_L'] <= 14 or l_key == '2号機' and job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']

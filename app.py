@@ -7,9 +7,7 @@ import io
 import os
 import copy
 import datetime
-from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter
+import gc  # 🌟【新秘密兵器】Python強制メモリ掃除機
 
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
@@ -46,7 +44,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・高速化: 🌟全関数を最上流グローバルへ固定した完全確定版！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・メモリ適正化: 🌟読み込んだエクセルを1枚ごとに即時焼却する常時エコ仕様！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -55,36 +53,47 @@ st.sidebar.info(
     f"・対象月度: {target_month}度計画\n"
     f"・開始日: {start_date.strftime('%Y/%m/%d')}\n"
     f"{rule_info}\n"
-    "・永続ストレージ: 一度入れたマスタデータは裏で自動保存されます\n"
+    "・完全自動化: 人間による手動データ加工を一切排除した現場直結仕様\n"
     "・残業最適化: 労務管理優先、必ず30分刻みジャストで終了探索\n"
     "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
 # =====================================================================
-# 🌟 最上流グローバル関数エリア（スコープエラーを100%封じる鉄壁配置）
+# 🌟 最上流グローバル・セーフティ関数群（メモリ掃除機つき）
 # =====================================================================
 
 def safe_seek(f):
     if hasattr(f, 'seek'): f.seek(0)
 
+# 🌟【大改修】1枚読むたびにメモリを強制掃除する超エコ・パーサー
 def load_excel_sheets_merged(file, keywords):
     safe_seek(file)
     xl = pd.ExcelFile(file)
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
     if not matched_sheets:
         safe_seek(file)
-        return pd.read_excel(file, sheet_name=0, header=None)
+        df_single = pd.read_excel(file, sheet_name=0, header=None)
+        return df_single
+    
     base_df = pd.read_excel(xl, sheet_name=matched_sheets[0], header=None)
     item_row_idx = 1
     for i in range(min(15, len(base_df))):
         row_vals = [str(v).strip() for v in base_df.iloc[i].values]
         if any(k in row_vals for k in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE']):
             item_row_idx = i; break
+            
     for sheet in matched_sheets[1:]:
         add_df = pd.read_excel(xl, sheet_name=sheet, header=None)
         if len(add_df) > item_row_idx + 1:
-            base_df = pd.concat([base_df, add_df.iloc[item_row_idx + 1:]], ignore_index=True)
+            tmp_df = add_df.iloc[item_row_idx + 1:].copy()
+            del add_df
+            base_df = pd.concat([base_df, tmp_df], ignore_index=True)
+            del tmp_df
+            gc.collect()  # 👈 1枚マージするたびにゴミ箱を空にする
+            
+    del xl
+    gc.collect()
     return base_df
 
 def clean_bom_master(df_raw_bom):
@@ -170,7 +179,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     if not file_zai or not file_gekkan:
         st.error("エラー: 必要ファイルをアップロードしてください。")
     else:
-        with st.spinner("⚡ 裏側でマスタを展開し、ハッシュエンジンで爆速計算中..."):
+        with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計算中..."):
             try:
                 df_bom = None
                 if file_bom is not None:
@@ -243,6 +252,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['現在の在庫'] = pd.to_numeric(df_zai_in_zai[base_date], errors='coerce')
                 df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫']).apply(lambda x: max(0, x))
 
+                # 🌟 メモリ掃除①：在庫リストの生データを即座に破棄
+                del df_zai_raw, df_zai_fixed
+                gc.collect()
+
                 # --- 月間計画書読み込み ---
                 df_monthly_raw = load_excel_sheets_merged(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"])
                 item_row_idx = next((i for i in range(min(15, len(df_monthly_raw))) if any(kw in [str(v).strip() for v in df_monthly_raw.iloc[i].values] for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ', '商品CODE'])), 1)
@@ -269,6 +282,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 })
                 df_m_clean['選択月_計画残数'] = (df_m_clean['選択月_製造予定'] - df_m_clean['選択月_製造実績']).apply(lambda x: max(0, x))
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (~df_m_clean['品目コード'].isin(['nan', '', 'None']))].drop_duplicates(subset=['品目コード'])
+
+                # 🌟 メモリ掃除②：一番重い計画書エクセル生データをここで全消去！
+                del df_monthly_raw, df_m, df_m_clean
+                gc.collect()
 
                 all_codes = set(df_zai_in_zai['品目コード']).union(set(df_m_distinct[df_m_distinct['選択月_計画残数'] > 0]['品目コード']))
                 master_list = []
@@ -321,6 +338,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
 
                 df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]).copy()
+
+                # 🌟 メモリ掃除③：タイムライン生成前に中間テーブルを全消去
+                del df_master_combined, df_final, grouped
+                gc.collect()
 
                 lines_list = ["1号機", "2号機", "3号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機"]
                 queues_base = {line: sort_jobs_by_size_proximity(df_final_sorted[df_final_sorted['製造ライン'] == line]) for line in lines_list}

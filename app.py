@@ -49,7 +49,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・特別頭脳: 🌟ファイル内の「過去実績シート」から【号機×品目別】のスピードを全自動で動的学習！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・コード防波堤: 🌟関西工場の在庫推移表にある【Hから始まる商品コード】を全自動で完全無視・除外！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -148,11 +148,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner(f"現在、過去データから【号機別×商品別】の実績スピードを自動解析して超精密パズルを解いています..."):
+        with st.spinner(f"現在、過去データから実績スピードを解析し、Hコードを除外して最適化しています..."):
             try:
-                # 🌟【最重要新機能：計画書ファイル内の過去実績シートを自動検知して動的にスピード辞書を生成】
-                speed_matrix = {}   # {(号機, 品目コード): 平均スピード}
-                line_avg_speed = {} # {号機: 全体平均スピード}
+                # 計画書ファイル内の過去実績シートを自動検知して動的にスピード辞書を生成
+                speed_matrix = {}   
+                line_avg_speed = {} 
                 
                 xl_gekkan = pd.ExcelFile(file_gekkan)
                 jisseki_sheets = [s for s in xl_gekkan.sheet_names if '実績' in s]
@@ -187,12 +187,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             return 'その他'
                         df_j_all['クリーン号機'] = df_j_all[c_line].apply(clean_line_name)
                         
-                        # 号機×商品コードのピンポイント平均を辞書化
                         for (l_name, i_code), g_df in df_j_all.groupby(['クリーン号機', c_code]):
                             mean_sp = g_df[c_speed].mean()
                             if mean_sp > 0: speed_matrix[(l_name, i_code)] = mean_sp
                         
-                        # 号機自体の全体平均を辞書化（実績がない新商品のセーフティネット用）
                         for l_name, g_df in df_j_all.groupby('クリーン号機'):
                             mean_sp = g_df[c_speed].mean()
                             if mean_sp > 0: line_avg_speed[l_name] = mean_sp
@@ -221,6 +219,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_fixed['品目名'] = df_zai_fixed['品目名'].ffill().astype(str).str.strip()
                 df_zai_fixed['安全在庫数'] = df_zai_fixed['安全在庫数'].ffill()
 
+                df_zai_in_zai = df_zai_fixed[df_zai_fixed['種類'] == 'In' or df_zai_fixed['種類'] == '在'].copy()
                 df_zai_in_zai = df_zai_fixed[df_zai_fixed['種類'] == '在'].copy()
                 df_zai_in_zai['安全在庫数'] = pd.to_numeric(df_zai_in_zai['安全在庫数'], errors='coerce')
                 date_cols = [c for c in df_zai_in_zai.columns if '(日)' in str(c)]
@@ -274,6 +273,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 master_list = []
                 for code in all_codes:
                     if code in ['合計', 'nan', '商品CD', '品目コード', 'None', '商品CODE']: continue
+                    
+                    # 🌟【新機能：関西工場モードのときだけ、Hから始まる本社商品コードを一発で完全無視して除外する防波堤ルール】
+                    if factory_mode == "関西工場" and str(code).startswith('H'):
+                        continue
+                        
                     zai_row = df_zai_in_zai[df_zai_in_zai['品目コード'] == code]
                     plan_row = df_m_distinct[df_m_distinct['品目コード'] == code]
                     name = zai_row['品目名'].iloc[0] if not zai_row.empty else (plan_row['品目名_計画書'].iloc[0] if not plan_row.empty else "不明")
@@ -288,6 +292,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     })
 
                 df_master_combined = pd.DataFrame(master_list)
+                if df_master_combined.empty:
+                    st.warning("計画対象となる品目がありません（すべてのコードが除外されたか、製造予定がありません）")
+                    st.stop()
+                    
                 df_master_combined['採用ベース数量'] = df_master_combined[['安全割れ不足数', '今月の計画残数']].max(axis=1)
                 df_master_combined = df_master_combined[df_master_combined['採用ベース数量'] > 0].copy()
 
@@ -322,7 +330,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
                 else:
                     def determine_kansai_line(r):
-                        if r['品目コード'] == 'H0620030' or '再生材' in r['品目名'] or 'もう一土元気' in r['品目名'] or r['堆肥・腐葉土フラグ']: return '3号機'
+                        if '再生材' in r['品目名'] or 'もう一土元気' in r['品目名'] or r['堆肥・腐葉土フラグ']: return '3号機'
                         elif r['容量_L'] <= 12: return '5号機'
                         elif r['容量_L'] >= 25: return '1号機'
                         elif 10 <= r['容量_L'] <= 20: return '6号機'
@@ -330,18 +338,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         else: return 'その他'
                     df_final['製造ライン'] = df_final.apply(determine_kansai_line, axis=1)
 
-                # 🌟【大進化：ライン別×商品別のピンポイント実績スピードを自動抽出し、ない場合はスマートに工場デフォルト値を割り当てる画期的なハイブリッドエンジン】
                 def calc_duration_mins_by_line_advanced(line, vol, bags, item_code):
                     if bags <= 0: return 0.0
-                    
-                    # 過去実績シートから「この号機×この商品コード」のピンポイントデータがあれば最優先適用
-                    if (line, item_code) in speed_matrix:
-                        speed = speed_matrix[(line, item_code)]
-                    # ピンポイントがなくても、この号機の全体平均が実績から算出されていればそれを適用
-                    elif line in line_avg_speed:
-                        speed = line_avg_speed[line]
+                    if (line, item_code) in speed_matrix: speed = speed_matrix[(line, item_code)]
+                    elif line in line_avg_speed: speed = line_avg_speed[line]
                     else:
-                        # 万が一過去実績データが全く読み込めなかった場合のセーフティデフォルト値
                         if factory_mode == "本社":
                             if line == '2号機': speed = 400
                             elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 250)
@@ -368,14 +369,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     line_df = df_final_sorted[df_final_sorted['製造ライン'] == line]
                     queues_base[line] = sort_jobs_by_size_proximity(line_df) if not line_df.empty else []
 
-                def get_next_working_date(current_date):
-                    next_d = current_date
-                    while True:
-                        if next_d.weekday() >= 5 or next_d in holidays_input: next_d += datetime.timedelta(days=1)
-                        else: break
-                    return next_d
-
-                # カレンダー型パズルシミュレーション
                 def run_calendar_simulation(overtime_block_mins):
                     queues = copy.deepcopy(queues_base)
                     current_job_idx = {l: 0 for l in queues}
@@ -400,7 +393,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                 if l == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: has_work = True
                                             else:
                                                 if l == '5号機' and job['容量_L'] <= 14 and not job['堆肥・腐葉土フラグ']: has_work = True
-                                                if l == '2号機' and job['容量_L'] <= 25 and not job['堆肥・腐土フラグ']: has_work = True
+                                                if l == '2号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: has_work = True
                             if has_work: active_lines.append(l)
                         
                         if not active_lines: break
@@ -441,7 +434,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     
                                     vol = job['容量_L']
                                     
-                                    # 辞書または個別スピードから分あたり数量を逆算
                                     if (line, job['品目コード']) in speed_matrix: sp = speed_matrix[(line, job['品目コード'])]
                                     elif line in line_avg_speed: sp = line_avg_speed[line]
                                     else:
@@ -505,7 +497,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                 available_time = capacity_limit_today - time_spent - switch_time
                                                 if available_time <= 5.0: break
                                                 
-                                                # 応援時も実績マトリクスをスキャン
                                                 if (line, job['品目コード']) in speed_matrix: sp = speed_matrix[(line, job['品目コード'])]
                                                 elif line in line_avg_speed: sp = line_avg_speed[line]
                                                 else: sp = 640 if line == '5号機' else 450
@@ -585,14 +576,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 ws_timeline = wb.create_sheet(title="日別・30分刻みタイムテーブル")
                 ws_timeline.views.sheetView[0].showGridLines = True
-                
-                time_slots = [
-                    "8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", 
-                    "10:00〜10:10(休憩)", "10:10〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", 
-                    "12:00〜13:00(昼休憩)", "13:00〜13:30", "13:30〜14:00", "14:00〜14:30", "14:30〜15:00", 
-                    "15:00〜15:10(休憩)", "15:10〜15:30", "15:30〜16:00", "16:00〜16:30", 
-                    "16:30〜17:00", "17:00〜17:30", "17:30〜18:00", "18:00〜18:30", "18:30〜19:00", "19:00〜19:30", "19:30〜20:00"
-                ]
                 ws_timeline.append(["稼働日", "製造日", "製造ライン"] + time_slots)
                 
                 unique_days = []
@@ -664,7 +647,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]: cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
-                # 縦セルの結合
                 num_lines = len(lines_list)
                 for d in range(len(unique_days)):
                     ws_timeline.merge_cells(start_row=2+(d*num_lines), start_column=1, end_row=2+(d*num_lines)+num_lines-1, end_column=1)

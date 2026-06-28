@@ -15,7 +15,7 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
 st.title("🚜 製造計画全自動スケジュールシステム (カレンダー完全同期版)")
-st.markdown("### エクセルを置くだけで、土日祝・金曜メンテ・30分刻みの横型ガント指示書を自動生成します")
+st.markdown("### エクセルを置くだけで、過去実績から【号機×商品別】のスピードを自動解析して最適化します")
 
 st.sidebar.markdown("## 🏢 工場の選択")
 factory_mode = st.sidebar.selectbox("対象の工場を選択してください", ["本社", "関西工場"])
@@ -47,9 +47,9 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 
 # 工場ごとの解説テキスト切り替え
 if factory_mode == "本社":
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機\n・仕事融通: 5号機等の高速機が自動応援"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・新機能: 🌟詳細レポート(29)から逆算した最新の巡航スピードを完全移植！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・特別頭脳: 🌟ファイル内の「過去実績シート」から【号機×品目別】のスピードを全自動で動的学習！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -63,7 +63,7 @@ st.sidebar.info(
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
-# 複数シートから目的のシートを自動検知して読み込む関数
+# 複数シートから該当する計画書をすべて集めて縦に自動結合するスマート関数
 def load_excel_sheets_merged(file, keywords):
     xl = pd.ExcelFile(file)
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
@@ -71,20 +71,17 @@ def load_excel_sheets_merged(file, keywords):
         return pd.read_excel(xl, sheet_name=xl.sheet_names[0], header=None)
     
     base_df = pd.read_excel(xl, sheet_name=matched_sheets[0], header=None)
-    
     item_row_idx = 1
     for i in range(min(15, len(base_df))):
         row_vals = [str(v).strip() for v in base_df.iloc[i].values]
         if any(k in row_vals for k in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE']):
-            item_row_idx = i
-            break
+            item_row_idx = i; break
             
     for sheet in matched_sheets[1:]:
         add_df = pd.read_excel(xl, sheet_name=sheet, header=None)
         if len(add_df) > item_row_idx + 1:
             data_to_add = add_df.iloc[item_row_idx + 1:]
             base_df = pd.concat([base_df, data_to_add], ignore_index=True)
-            
     return base_df
 
 # サイズ近接ソート関数
@@ -151,8 +148,55 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner(f"現在、関西工場の最新巡航スピードデータを同期させてパズルを組み立てています..."):
+        with st.spinner(f"現在、過去データから【号機別×商品別】の実績スピードを自動解析して超精密パズルを解いています..."):
             try:
+                # 🌟【最重要新機能：計画書ファイル内の過去実績シートを自動検知して動的にスピード辞書を生成】
+                speed_matrix = {}   # {(号機, 品目コード): 平均スピード}
+                line_avg_speed = {} # {号機: 全体平均スピード}
+                
+                xl_gekkan = pd.ExcelFile(file_gekkan)
+                jisseki_sheets = [s for s in xl_gekkan.sheet_names if '実績' in s]
+                
+                if jisseki_sheets:
+                    jisseki_dfs = []
+                    for sheet in jisseki_sheets:
+                        df_j = pd.read_excel(xl_gekkan, sheet_name=sheet, header=None)
+                        h_row = 0
+                        for i in range(min(15, len(df_j))):
+                            r_vals = [str(v).strip() for v in df_j.iloc[i].values]
+                            if '時間あたり数量' in r_vals:
+                                h_row = i; break
+                        df_j_clean = df_j.iloc[h_row+1:].copy()
+                        df_j_clean.columns = [str(c).strip() for c in df_j.iloc[h_row].values]
+                        jisseki_dfs.append(df_j_clean)
+                    
+                    df_j_all = pd.concat(jisseki_dfs, ignore_index=True)
+                    col_line = [c for c in df_j_all.columns if '設備' in c or 'ライン' in c or '号機' in c]
+                    col_code = [c for c in df_j_all.columns if 'コード' in c or 'CODE' in c or 'CD' in c]
+                    col_speed = [c for c in df_j_all.columns if '時間あたり数量' in c or 'スピード' in c]
+                    
+                    if col_line and col_code and col_speed:
+                        c_line = col_line[0]; c_code = col_code[0]; c_speed = col_speed[0]
+                        df_j_all[c_speed] = pd.to_numeric(df_j_all[c_speed], errors='coerce')
+                        df_j_all[c_code] = df_j_all[c_code].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+                        
+                        def clean_line_name(val):
+                            val_str = str(val)
+                            for m in ['1号機', '2号機', '3号機', '5号機', '6号機', 'その他']:
+                                if m in val_str: return m
+                            return 'その他'
+                        df_j_all['クリーン号機'] = df_j_all[c_line].apply(clean_line_name)
+                        
+                        # 号機×商品コードのピンポイント平均を辞書化
+                        for (l_name, i_code), g_df in df_j_all.groupby(['クリーン号機', c_code]):
+                            mean_sp = g_df[c_speed].mean()
+                            if mean_sp > 0: speed_matrix[(l_name, i_code)] = mean_sp
+                        
+                        # 号機自体の全体平均を辞書化（実績がない新商品のセーフティネット用）
+                        for l_name, g_df in df_j_all.groupby('クリーン号機'):
+                            mean_sp = g_df[c_speed].mean()
+                            if mean_sp > 0: line_avg_speed[l_name] = mean_sp
+
                 # 1. 在庫推移リストの読み込み
                 df_zai_raw = load_excel_sheets_merged(file_zai, ["在庫推移リスト", "在庫推移"])
                 header_idx = None
@@ -213,7 +257,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 for c_idx in range(min(5, len(df_monthly_raw.columns))):
                     val = str(df_monthly_raw.iloc[item_row_idx, c_idx]).strip()
                     if any(kw in val for kw in ['商品CD', '品目コード', 'コード', '商品', '商品CODE']): code_col_idx = c_idx
-                    elif any(kw in val for kw in ['商品名', '品目名', '名', '品名', '名']): name_col_idx = c_idx
+                    elif any(kw in val for kw in ['商品名', '品目名', '名', '品名']): name_col_idx = c_idx
 
                 df_m = df_monthly_raw.iloc[item_row_idx+1:].copy()
                 df_m_clean = pd.DataFrame({
@@ -273,6 +317,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: '腐葉土' in str(n) or '堆肥' in str(n) or '特大袋' in str(n))
                 
+                # 製造ライン自動仕分け（工場別）
                 if factory_mode == "本社":
                     df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
                 else:
@@ -285,25 +330,33 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         else: return 'その他'
                     df_final['製造ライン'] = df_final.apply(determine_kansai_line, axis=1)
 
-                # 🌟【最新アップデート：レポート（29）から導き出された最も正確な製造スピードを完全同期】
-                def calc_duration_mins_by_line(line, vol, bags):
+                # 🌟【大進化：ライン別×商品別のピンポイント実績スピードを自動抽出し、ない場合はスマートに工場デフォルト値を割り当てる画期的なハイブリッドエンジン】
+                def calc_duration_mins_by_line_advanced(line, vol, bags, item_code):
                     if bags <= 0: return 0.0
-                    if factory_mode == "本社":
-                        if line == '2号機': speed = 400
-                        elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 250)
-                        elif line == '5号機': speed = 730 if vol in [12, 14] else 650
-                        else: speed = 260
+                    
+                    # 過去実績シートから「この号機×この商品コード」のピンポイントデータがあれば最優先適用
+                    if (line, item_code) in speed_matrix:
+                        speed = speed_matrix[(line, item_code)]
+                    # ピンポイントがなくても、この号機の全体平均が実績から算出されていればそれを適用
+                    elif line in line_avg_speed:
+                        speed = line_avg_speed[line]
                     else:
-                        # 関西工場の実績レポート（29）解析による超高精度巡航実力値
-                        if line == '1号機': speed = 388   # 大袋用実績スピード
-                        elif line == '2号機': speed = 500  # 中袋用実績スピード
-                        elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 190) # 堆肥・腐葉土実績
-                        elif line == '5号機': speed = 646  # 小袋用実績
-                        elif line == '6号機': speed = 480  # 高速ライン実績
-                        else: speed = 107                  # その他（4号機半自動実績ベース）
+                        # 万が一過去実績データが全く読み込めなかった場合のセーフティデフォルト値
+                        if factory_mode == "本社":
+                            if line == '2号機': speed = 400
+                            elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 250)
+                            elif line == '5号機': speed = 730 if vol in [12, 14] else 650
+                            else: speed = 260
+                        else:
+                            if line == '1号機': speed = 388
+                            elif line == '2号機': speed = 500
+                            elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 190)
+                            elif line == '5号機': speed = 646
+                            elif line == '6号機': speed = 480
+                            else: speed = 107
                     return (bags / speed) * 60
 
-                df_final['製造所要時間_分'] = df_final.apply(lambda r: calc_duration_mins_by_line(r['製造ライン'], r['容量_L'], r['計画製造袋数']), axis=1)
+                df_final['製造所要時間_分'] = df_final.apply(lambda r: calc_duration_mins_by_line_advanced(r['製造ライン'], r['容量_L'], r['計画製造袋数'], r['品目コード']), axis=1)
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                 df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
 
@@ -322,6 +375,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         else: break
                     return next_d
 
+                # カレンダー型パズルシミュレーション
                 def run_calendar_simulation(overtime_block_mins):
                     queues = copy.deepcopy(queues_base)
                     current_job_idx = {l: 0 for l in queues}
@@ -346,7 +400,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                 if l == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: has_work = True
                                             else:
                                                 if l == '5号機' and job['容量_L'] <= 14 and not job['堆肥・腐葉土フラグ']: has_work = True
-                                                if l == '2号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: has_work = True
+                                                if l == '2号機' and job['容量_L'] <= 25 and not job['堆肥・腐土フラグ']: has_work = True
                             if has_work: active_lines.append(l)
                         
                         if not active_lines: break
@@ -386,19 +440,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     if available_time <= 5.0: break
                                     
                                     vol = job['容量_L']
-                                    if factory_mode == "本社":
-                                        if line == '2号機': speed_per_min = 400 / 60
-                                        elif line == '3号機': speed_per_min = (70 if vol == 55 else (100 if vol == 30 else 250)) / 60
-                                        elif line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
-                                        else: speed_per_min = 260 / 60
-                                    else:
-                                        if line == '1号機': speed_per_min = 388 / 60
-                                        elif line == '2号機': speed_per_min = 500 / 60
-                                        elif line == '3号機': speed_per_min = (70 if vol == 55 else (100 if vol == 30 else 190)) / 60
-                                        elif line == '5号機': speed_per_min = 646 / 60
-                                        elif line == '6号機': speed_per_min = 480 / 60
-                                        else: speed_per_min = 107 / 60
                                     
+                                    # 辞書または個別スピードから分あたり数量を逆算
+                                    if (line, job['品目コード']) in speed_matrix: sp = speed_matrix[(line, job['品目コード'])]
+                                    elif line in line_avg_speed: sp = line_avg_speed[line]
+                                    else:
+                                        if factory_mode == "本社":
+                                            sp = 400 if line == '2号機' else (250 if line == '3号機' else (650 if line == '5号機' else 260))
+                                        else:
+                                            sp = 388 if line == '1号機' else (500 if line == '2号機' else (190 if line == '3号機' else (646 if line == '5号機' else (480 if line == '6号機' else 107))))
+                                    
+                                    speed_per_min = sp / 60
                                     max_bags_today = available_time * speed_per_min
                                     start_time_current = time_spent + switch_time
                                     
@@ -452,15 +504,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                 switch_time = 10.0
                                                 available_time = capacity_limit_today - time_spent - switch_time
                                                 if available_time <= 5.0: break
-                                                vol = job['容量_L']
                                                 
-                                                if factory_mode == "本社":
-                                                    if line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
-                                                    else: speed_per_min = 400 / 60
-                                                else:
-                                                    if line == '5号機': speed_per_min = 700 / 60
-                                                    else: speed_per_min = 500 / 60
+                                                # 応援時も実績マトリクスをスキャン
+                                                if (line, job['品目コード']) in speed_matrix: sp = speed_matrix[(line, job['品目コード'])]
+                                                elif line in line_avg_speed: sp = line_avg_speed[line]
+                                                else: sp = 640 if line == '5号機' else 450
                                                 
+                                                speed_per_min = sp / 60
                                                 max_bags_today = available_time * speed_per_min
                                                 start_time_current = time_spent + switch_time
                                                 
@@ -639,10 +689,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 お待たせいたしました！関西工場の『最新巡航スピード』を完全同期したスケジュール指示書が完成しました！")
+                st.success(f"🎉 お待たせいたしました！【号機別×商品別】の動的実績解析パズルエンジンが完全に稼働しました！")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
-                    data=excel_data, file_name=f"【確定完成版】{factory_mode}_{target_month}度_日次指示スケジュール表.xlsx",
+                    data=excel_data, file_name=f"【確定完成版】{factory_mode}_{target_month}度_動的実績連動スケジュール表.xlsx",
                     mime="application/vnd.openpyxlformats-officedocument.spreadsheetml.sheet"
                 )
             except Exception as e: st.error(f"エラーが発生しました。詳細: {str(e)}")

@@ -7,7 +7,6 @@ import io
 import os
 import copy
 import datetime
-# 🌟【最重要修正：消えていたエクセル出力ライブラリのインポート文を完全に復活させました】
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
@@ -46,16 +45,21 @@ else:
 
 file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (ExcelまたはCSV)", type=["xlsx", "csv"])
 
+# 工場ごとの解説テキスト切り替え
+if factory_mode == "本社":
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機\n・仕事融通: 5号機等の高速機が自動応援"
+else:
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・実績同期: 🌟レポートから逆算した超リアルな実力スピードを完全適用！"
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
 st.sidebar.info(
     f"・選択中の工場: {factory_mode}\n"
     f"・対象月度: {target_month}度計画\n"
     f"・開始日: {start_date.strftime('%Y/%m/%d')}\n"
-    "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n"
+    f"{rule_info}\n"
     "・残業最適化: 労務管理優先、必ず30分刻みジャストで終了探索\n"
-    "・カレンダー: 土日および指定された休業日は自動的にスキップ\n"
-    "・仕事融通：高速ライン(5号機等)が他ラインを自動応援製造\n"
+    "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
@@ -133,7 +137,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     elif df_bom is None:
         st.error("エラー: 構成表マスタが見つかりません。")
     else:
-        with st.spinner("現在、カレンダー・曜日・金曜メンテ・30分残業探索ルールを同期させてパズルを組み立てています..."):
+        with st.spinner(f"現在、{factory_mode}の実績レポート解析数値を同期させてパズルを組み立てています..."):
             try:
                 # 1. 在庫推移リストの読み込み
                 df_zai_raw = load_excel_sheet_smart(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -254,15 +258,43 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1)
 
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: '腐葉土' in str(n) or '堆肥' in str(n) or '特大袋' in str(n))
-                df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
+                
+                # 工場モードによる製造ライン判定の分岐制御
+                if factory_mode == "本社":
+                    df_final['製造ライン'] = df_final.apply(lambda row_item: '3号機' if (row_item['品目コード'] == 'H0620030' or '再生材' in row_item['品目名'] or 'もう一土元気' in row_item['品目名'] or row_item['堆肥・腐葉土フラグ']) else ('5号機' if row_item['容量_L'] <= 12 else ('2号機' if 14 <= row_item['容量_L'] <= 20 else ('6号機' if row_item['容量_L'] >= 25 else '要確認'))), axis=1)
+                else:
+                    # 関西工場専用のサイズ・品種仕分けルール（星野様からいただいたライン特徴を完全移植）
+                    def determine_kansai_line(r):
+                        if r['品目コード'] == 'H0620030' or '再生材' in r['品目名'] or 'もう一土元気' in r['品目名'] or r['堆肥・腐葉土フラグ']:
+                            return '3号機'  # 3号機：堆肥、腐葉土、再生材メイン（培養土も可能）
+                        elif r['容量_L'] <= 12:
+                            return '5号機'  # 5号機：1〜12L 小さい袋メイン
+                        elif r['容量_L'] >= 25:
+                            return '1号機'  # 1号機：25L〜40L 大袋用
+                        elif 10 <= r['容量_L'] <= 20:
+                            return '6号機'  # 6号機：10〜20L 高速ライン
+                        elif 10 <= r['容量_L'] <= 25:
+                            return '2号機'  # 2号機：10〜25L 中袋用
+                        else:
+                            return 'その他'  # その他：4号機（半自動）・7号機（手詰め）
+                    df_final['製造ライン'] = df_final.apply(determine_kansai_line, axis=1)
 
+                # 🌟【最新アップデート：レポート（26）から判明した関西工場の本物の実力スピードを完全適用】
                 def calc_duration_mins_by_line(line, vol, bags):
                     if bags <= 0: return 0.0
-                    if line == '2号機': speed = 400
-                    elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 250)
-                    elif line == '5号機': speed = 730 if vol in [12, 14] else 650
-                    elif line == '6号機': speed = 260
-                    else: speed = 400
+                    if factory_mode == "本社":
+                        if line == '2号機': speed = 400
+                        elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 250)
+                        elif line == '5号機': speed = 730 if vol in [12, 14] else 650
+                        else: speed = 260
+                    else:
+                        # 関西工場の実績レポート（26）解析による真の実力値
+                        if line == '1号機': speed = 405   # 大袋用実績スピード
+                        elif line == '2号機': speed = 470  # 中袋用実績スピード
+                        elif line == '3号機': speed = 70 if vol == 55 else (100 if vol == 30 else 180) # 堆肥・腐葉土実績ベース
+                        elif line == '5号機': speed = 700  # 小袋用超高速実績
+                        elif line == '6号機': speed = 588  # 高速ライン実績
+                        else: speed = 125                  # その他（4号機半自動実績ベース）
                     return (bags / speed) * 60
 
                 df_final['製造所要時間_分'] = df_final.apply(lambda r: calc_duration_mins_by_line(r['製造ライン'], r['容量_L'], r['計画製造袋数']), axis=1)
@@ -271,18 +303,21 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]).copy()
 
+                # 号機リストの動的定義
+                lines_list = ["1号機", "2号機", "3号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機"]
                 queues_base = {}
-                for line in ['2号機', '3号機', '5号機', '6号機']:
+                for line in lines_list:
                     line_df = df_final_sorted[df_final_sorted['製造ライン'] == line]
                     queues_base[line] = sort_jobs_by_size_proximity(line_df) if not line_df.empty else []
 
                 def get_next_working_date(current_date):
                     next_d = current_date
                     while True:
-                        if next_d.weekday() >= 5 or next_d in holidays_input: loop_date_next = next_d + datetime.timedelta(days=1); next_d = loop_date_next
+                        if next_d.weekday() >= 5 or next_d in holidays_input: next_d += datetime.timedelta(days=1)
                         else: break
                     return next_d
 
+                # カレンダー型パズルシミュレーション
                 def run_calendar_simulation(overtime_block_mins):
                     queues = copy.deepcopy(queues_base)
                     current_job_idx = {l: 0 for l in queues}
@@ -294,29 +329,37 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     
                     while True:
                         active_lines = []
-                        for l in ['5号機', '2号機', '6号機', '3号機']:
+                        for l in lines_list:
                             has_work = False
                             if current_job_idx[l] < len(queues[l]) and queues[l][current_job_idx[l]]['remaining_bags'] > 0: has_work = True
                             else:
-                                for ol in ['6号機', '2号機', '5号機', '3号機']:
+                                for ol in lines_list:
                                     if ol == l: continue
                                     for job in queues[ol]:
                                         if job['remaining_bags'] > 0:
-                                            if l == '5号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: has_work = True
-                                            if l == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: has_work = True
+                                            if factory_mode == "本社":
+                                                if l == '5号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: has_work = True
+                                                if l == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: has_work = True
+                                            else:
+                                                if l == '5号機' and job['容量_L'] <= 14 and not job['堆肥・腐葉土フラグ']: has_work = True
+                                                if l == '2号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: has_work = True
                             if has_work: active_lines.append(l)
                         
                         if not active_lines: break
                         
-                        has_pair_2_6 = ('2号機' in active_lines) or ('6号機' in active_lines)
-                        has_pair_3_5 = ('3号機' in active_lines) or ('5号機' in active_lines)
-                        
-                        if '2号機' in active_lines and '3号機' in active_lines and '5号機' in active_lines and '6号機' in active_lines:
-                            lines_to_run_today = ['2号機', '3号機', '5号機', '6号機']
-                        elif has_pair_3_5 and ('5号機' in active_lines or not has_pair_2_6):
-                            lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
+                        # 関西工場専用の人員制約（熟練者による1・2・6号機同時稼働、3・5・その他並行）を内包したライン選定
+                        if factory_mode == "本社":
+                            has_pair_2_6 = ('2号機' in active_lines) or ('6号機' in active_lines)
+                            has_pair_3_5 = ('3号機' in active_lines) or ('5号機' in active_lines)
+                            if '2号機' in active_lines and '3号機' in active_lines and '5号機' in active_lines and '6号機' in active_lines:
+                                lines_to_run_today = ['2号機', '3号機', '5号機', '6号機']
+                            elif has_pair_3_5 and ('5号機' in active_lines or not has_pair_2_6):
+                                lines_to_run_today = [l for l in ['3号機', '5号機'] if l in active_lines]
+                            else:
+                                lines_to_run_today = [l for l in ['2号機', '6号機'] if l in active_lines]
                         else:
-                            lines_to_run_today = [l for l in ['2号機', '6号機'] if l in active_lines]
+                            # 関西工場：熟練者が1号・2号・6号機を一括監視可能なため、この3台＋他ラインもすべてフル並行稼働OK
+                            lines_to_run_today = [l for l in lines_list if l in active_lines]
                         
                         is_friday = (loop_date.weekday() == 4)
                         daily_base_capacity = 400.0 if is_friday else 430.0 
@@ -341,10 +384,18 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     if available_time <= 5.0: break
                                     
                                     vol = job['容量_L']
-                                    if line == '2号機': speed_per_min = 400 / 60
-                                    elif line == '3号機': speed_per_min = (70 if vol == 55 else (100 if vol == 30 else 250)) / 60
-                                    elif line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
-                                    else: speed_per_min = 260 / 60
+                                    if factory_mode == "本社":
+                                        if line == '2号機': speed_per_min = 400 / 60
+                                        elif line == '3号機': speed_per_min = (70 if vol == 55 else (100 if vol == 30 else 250)) / 60
+                                        elif line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
+                                        else: speed_per_min = 260 / 60
+                                    else:
+                                        if line == '1号機': speed_per_min = 405 / 60
+                                        elif line == '2号機': speed_per_min = 470 / 60
+                                        elif line == '3号機': speed_per_min = (70 if vol == 55 else (100 if vol == 30 else 180)) / 60
+                                        elif line == '5号機': speed_per_min = 700 / 60
+                                        elif line == '6号機': speed_per_min = 588 / 60
+                                        else: speed_per_min = 125 / 60
                                     
                                     max_bags_today = available_time * speed_per_min
                                     start_time_current = time_spent + switch_time
@@ -383,21 +434,30 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         break
                                 else:
                                     supported_job_found = False
-                                    for other_line in ['6号機', '2号機', '5号機', '3号機']:
+                                    for other_line in lines_list:
                                         if other_line == line: continue
                                         for job in queues[other_line]:
                                             if job['remaining_bags'] <= 0: continue
                                             can_support = False
-                                            if line == '5号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: can_support = True
-                                            if line == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: can_support = True
+                                            if factory_mode == "本社":
+                                                if line == '5号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: can_support = True
+                                                if line == '2号機' and job['容量_L'] <= 30 and not job['堆肥・腐葉土フラグ']: can_support = True
+                                            else:
+                                                if line == '5号機' and job['容量_L'] <= 14 and not job['堆肥・腐葉土フラグ']: can_support = True
+                                                if line == '2号機' and job['容量_L'] <= 25 and not job['堆肥・腐葉土フラグ']: can_support = True
                                             
                                             if can_support:
                                                 switch_time = 10.0
                                                 available_time = capacity_limit_today - time_spent - switch_time
                                                 if available_time <= 5.0: break
                                                 vol = job['容量_L']
-                                                if line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
-                                                else: speed_per_min = 400 / 60
+                                                
+                                                if factory_mode == "本社":
+                                                    if line == '5号機': speed_per_min = (730 if vol in [12, 14] else 650) / 60
+                                                    else: speed_per_min = 400 / 60
+                                                else:
+                                                    if line == '5号機': speed_per_min = 700 / 60
+                                                    else: speed_per_min = 470 / 60
                                                 
                                                 max_bags_today = available_time * speed_per_min
                                                 start_time_current = time_spent + switch_time
@@ -413,7 +473,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                         '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(bags_to_make),
                                                         '開始時間_分': start_time_current, '製造時間(分)': round(job_duration, 1),
                                                         '切り替え(分)': round(switch_time, 1), '合計拘束時間(分)': round(switch_time + job_duration, 1), 
-                                                        '製造理由': job['製造理由'], '備考': f"★{other_line}の応援製造(全量完了)", 't_start': t_start, 't_end': t_end
+                                                        '製造理由': job['製造理由'], '備考': f"★{other_line}의 응援製造(全量完了)", 't_start': t_start, 't_end': t_end
                                                     })
                                                     job['remaining_bags'] = 0
                                                 else:
@@ -442,7 +502,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if day_count > 45: break
                     return schedule, (day_count - 1)
 
-                # 初期シミュレーション
+                # 最小残業探索
                 overtime_mins = 0
                 full_schedule, generated_days = run_calendar_simulation(0)
                 
@@ -497,24 +557,12 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 for (d_str, date_str) in unique_days:
                     d_obj = datetime.datetime.strptime(date_str, "%Y/%m/%d")
                     w_kanji = ["月", "火", "水", "木", "金", "土", "日"][d_obj.weekday()]
-                    for line in ["2号機", "3号機", "5号機", "6号機"]:
+                    for line in lines_list:
                         matrix_rows.append({
                             'day_str': d_str, 'date_disp': f"{date_str} ({w_kanji})", 'line_name': line,
-                            'line_disp': {"2号機": "NO.2", "3号機": "NO.3", "5号機": "NO.5", "6号機": "NO.6"}[line],
+                            'line_disp': {"1号機": "NO.1", "2号機": "NO.2", "3号機": "NO.3", "5号機": "NO.5", "6号機": "NO.6", "その他": "その他"}.get(line, line),
                             'slots': [""] * 25
                         })
-                
-                slot_ranges = {}
-                for s_idx in range(25):
-                    if s_idx < 4: slot_ranges[s_idx] = (s_idx * 30, (s_idx + 1) * 30)
-                    elif s_idx == 4: slot_ranges[s_idx] = (None, "小休憩")
-                    elif s_idx == 5: slot_ranges[s_idx] = (120, 140)
-                    elif s_idx < 9: slot_ranges[s_idx] = (140 + (s_idx - 6) * 30, 140 + (s_idx - 5) * 30)
-                    elif s_idx == 9: slot_ranges[s_idx] = (None, "昼休憩")
-                    elif s_idx < 14: slot_ranges[s_idx] = (230 + (s_idx - 10) * 30, 230 + (s_idx - 9) * 30)
-                    elif s_idx == 14: slot_ranges[s_idx] = (None, "小休憩")
-                    elif s_idx == 15: slot_ranges[s_idx] = (350, 370)
-                    else: slot_ranges[s_idx] = (370 + (s_idx - 16) * 30, 370 + (s_idx - 15) * 30)
 
                 for job in full_schedule:
                     d_str = job['稼働日']; l_key = job['製造ライン']
@@ -568,14 +616,15 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 ws_timeline.row_dimensions[1].height = 26
                 for cell in ws_timeline[1]: cell.fill = navy_fill; cell.font = white_font; cell.alignment = Alignment(horizontal="center", vertical="center")
                 
-                # 縦セルの結合 🌟【二重記述バグの完全消去が100%確定しました！】
+                # 縦セルの結合
+                num_lines = len(lines_list)
                 for d in range(len(unique_days)):
-                    ws_timeline.merge_cells(start_row=2+(d*4), start_column=1, end_row=2+(d*4)+3, end_column=1)
-                    ws_timeline.merge_cells(start_row=2+(d*4), start_column=2, end_row=2+(d*4)+3, end_column=2)
+                    ws_timeline.merge_cells(start_row=2+(d*num_lines), start_column=1, end_row=2+(d*num_lines)+num_lines-1, end_column=1)
+                    ws_timeline.merge_cells(start_row=2+(d*num_lines), start_column=2, end_row=2+(d*num_lines)+num_lines-1, end_column=2)
 
                 for row_idx in range(2, ws_timeline.max_row + 1):
                     ws_timeline.row_dimensions[row_idx].height = 65 
-                    is_even_day = ((row_idx - 2) // 4 % 2 == 0)
+                    is_even_day = ((row_idx - 2) // num_lines % 2 == 0)
                     for cell in ws_timeline[row_idx]:
                         cell.font = regular_font; cell.border = border_all
                         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -592,10 +641,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 wb.save(excel_data)
                 excel_data.seek(0)
 
-                st.success(f"🎉 大変お待たせいたしました！今度こそすべての修正が完了しました。")
+                st.success(f"🎉 お待たせいたしました！関西工場の『本物の実力スピード』を完全同期したスケジュール指示書が完成しました！")
                 st.download_button(
                     label="📊 製造指示スケジュール表(.xlsx)をダウンロード",
-                    data=excel_data, file_name=f"【確定完成版】{target_month}度_日次製造指示スケジュール表.xlsx",
+                    data=excel_data, file_name=f"【確定完成版】{factory_mode}_{target_month}度_日次指示スケジュール表.xlsx",
                     mime="application/vnd.openpyxlformats-officedocument.spreadsheetml.sheet"
                 )
             except Exception as e: st.error(f"エラーが発生しました。詳細: {str(e)}")

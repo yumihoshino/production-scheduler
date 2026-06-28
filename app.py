@@ -181,7 +181,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     if not file_zai or not file_gekkan:
         st.error("エラー: 必要ファイルをアップロードしてください。")
     else:
-        with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計算中..."):
+        with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計画ファイルを出力中..."):
             try:
                 df_bom = None
                 if file_bom is not None:
@@ -232,7 +232,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     st.error("エラー: 構成表マスタが見つかりません。")
                     st.stop()
 
-                # 🌟【大復活＆位置修正】読み込まれたマスタから「その場」で爆速ハッシュ辞書を生成！
+                # 🌟【大修正：名寄せの核心】読み込まれた最新マスタから「その場」で爆速ハッシュ辞書を強制再生成！
                 bom_lookup_dict = {}
                 if not df_bom.empty:
                     p_col = next((c for c in df_bom.columns if c in ['商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
@@ -242,7 +242,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if pv not in bom_lookup_dict or cv.startswith(('BH', 'BK')):
                             bom_lookup_dict[pv] = cv
 
-                # 🌟【インライン関数化】作成した最新辞書を確実に参照する名寄せ頭脳
+                # 🌟【インライン関数化】確定した最新辞書を確実に100%参照させる防弾ロジック
                 def extract_content_code(item_code):
                     return bom_lookup_dict.get(str(item_code).strip(), item_code)
 
@@ -275,7 +275,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 plan_col_idx = None; actual_col_idx = None
                 for search_c in range(len(df_monthly_raw.columns)):
-                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])  # 👈 タイポ完全修復
+                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])  # 🌟タイポ完全修復
                     if ('予定' in col_text or '計画' in col_text) and plan_col_idx is None: plan_col_idx = search_c
                     elif '実績' in col_text and actual_col_idx is None: actual_col_idx = search_c
 
@@ -382,7 +382,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 idx = cur_idx[line]
                                 if idx < len(queues[line]):
                                     job = queues[line][idx]
-                                    sw = 5.0 if spent > 0 hover p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
+                                    sw = 5.0 if spent > 0 and p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
                                     avail = cap_limit - spent - sw
                                     if avail <= 5.0: break
                                     

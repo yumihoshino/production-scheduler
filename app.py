@@ -7,8 +7,8 @@ import io
 import os
 import copy
 import datetime
-import gc  # 強制メモリ掃除機
-from openpyxl import Workbook  # 🌟【完全復活】エクセル生成エンジン
+import gc
+from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -47,7 +47,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・完全覚醒: 🌟パズル計算・エクセル書き出しの全バグを根絶した正真正銘の最終版！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・誤爆防止: 🌟古い本社マスタを強制看破して排除する関西専用検問ロック搭載！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -57,13 +57,13 @@ st.sidebar.info(
     f"・開始日: {start_date.strftime('%Y/%m/%d')}\n"
     f"{rule_info}\n"
     "・完全自動化: 人間による手動データ加工を一切排除した現場直結仕様\n"
-    "・残業最適化: 労務管理優先、必ず 30 分刻みジャストで終了探索\n"
+    "・残業最適化: 労務管理優先、必ず30分刻みジャストで終了探索\n"
     "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
 # =====================================================================
-# 🌟 最上流グローバル・セーフティ関数群（メモリ掃除機つき）
+# 🌟 最上流グローバル・セーフティ関数群
 # =====================================================================
 
 def safe_seek(f):
@@ -203,6 +203,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
                     except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
 
+                # 🌟【ここが真の防波堤：関西マスタ誤爆チェック検問】
+                # もし過去の古いマスタがロードされても、関西モードなのにBKコードが無ければ強制破棄！
+                if df_bom is not None and not df_bom.empty and factory_mode == "関西工場":
+                    has_bk = False
+                    for col in df_bom.columns:
+                        if df_bom[col].astype(str).str.contains('BK').any():
+                            has_bk = True; break
+                    if not has_bk:
+                        df_bom = None  # 本社データの誤爆を検知して抹殺
+
+                # 🌟 誤爆マスタが破棄されて空(None)になった場合、ここで計画書エクセル内から100%確実に本物の関西マスタを吸い上げる！
                 if df_bom is None and file_gekkan is not None:
                     try:
                         safe_seek(file_gekkan)
@@ -263,7 +274,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 plan_col_idx = None; actual_col_idx = None
                 for search_c in range(len(df_monthly_raw.columns)):
-                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])
+                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for range(item_row_idx + 1)])
                     if ('予定' in col_text or '計画' in col_text) and plan_col_idx is None: plan_col_idx = search_c
                     elif '実績' in col_text and actual_col_idx is None: actual_col_idx = search_c
 

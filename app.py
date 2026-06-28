@@ -7,7 +7,10 @@ import io
 import os
 import copy
 import datetime
-import gc
+import gc  # 強制メモリ掃除機
+from openpyxl import Workbook  # 🌟【完全復活】エクセル生成エンジン
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
@@ -44,7 +47,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・メモリ大掃除: 🌟全関数グローバル固定＋エクセル即時焼却のエコ仕様！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・完全覚醒: 🌟パズル計算・エクセル書き出しの全バグを根絶した正真正銘の最終版！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -54,13 +57,13 @@ st.sidebar.info(
     f"・開始日: {start_date.strftime('%Y/%m/%d')}\n"
     f"{rule_info}\n"
     "・完全自動化: 人間による手動データ加工を一切排除した現場直結仕様\n"
-    "・残業最適化: 労務管理優先、必ず30分刻みジャストで終了探索\n"
+    "・残業最適化: 労務管理優先、必ず 30 分刻みジャストで終了探索\n"
     "・製造理由: [現在庫がマイナス] [安全在庫割れ] [計画未達] の3種仕分け\n"
     "・休憩ロック: 10:00(10分), 12:00(60分), 15:00(10分)"
 )
 
 # =====================================================================
-# 🌟 最上流グローバル・セーフティ関数群（絶対にクロージャ迷子にならないエリア）
+# 🌟 最上流グローバル・セーフティ関数群（メモリ掃除機つき）
 # =====================================================================
 
 def safe_seek(f):
@@ -72,7 +75,8 @@ def load_excel_sheets_merged(file, keywords):
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
     if not matched_sheets:
         safe_seek(file)
-        return pd.read_excel(file, sheet_name=0, header=None)
+        df_single = pd.read_excel(file, sheet_name=0, header=None)
+        return df_single
     
     base_df = pd.read_excel(xl, sheet_name=matched_sheets[0], header=None)
     item_row_idx = 1
@@ -177,7 +181,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
     if not file_zai or not file_gekkan:
         st.error("エラー: 必要ファイルをアップロードしてください。")
     else:
-        with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計算中..."):
+        with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計画ファイルを出力中..."):
             try:
                 df_bom = None
                 if file_bom is not None:

@@ -7,7 +7,7 @@ import io
 import os
 import copy
 import datetime
-import gc  # 🌟【新秘密兵器】Python強制メモリ掃除機
+import gc
 
 st.set_page_config(page_title="製造計画自動スケジュールシステム", page_icon="🚜", layout="wide")
 
@@ -44,7 +44,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・メモリ適正化: 🌟読み込んだエクセルを1枚ごとに即時焼却する常時エコ仕様！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・メモリ大掃除: 🌟全関数グローバル固定＋エクセル即時焼却のエコ仕様！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -60,21 +60,19 @@ st.sidebar.info(
 )
 
 # =====================================================================
-# 🌟 最上流グローバル・セーフティ関数群（メモリ掃除機つき）
+# 🌟 最上流グローバル・セーフティ関数群（絶対にクロージャ迷子にならないエリア）
 # =====================================================================
 
 def safe_seek(f):
     if hasattr(f, 'seek'): f.seek(0)
 
-# 🌟【大改修】1枚読むたびにメモリを強制掃除する超エコ・パーサー
 def load_excel_sheets_merged(file, keywords):
     safe_seek(file)
     xl = pd.ExcelFile(file)
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
     if not matched_sheets:
         safe_seek(file)
-        df_single = pd.read_excel(file, sheet_name=0, header=None)
-        return df_single
+        return pd.read_excel(file, sheet_name=0, header=None)
     
     base_df = pd.read_excel(xl, sheet_name=matched_sheets[0], header=None)
     item_row_idx = 1
@@ -90,7 +88,7 @@ def load_excel_sheets_merged(file, keywords):
             del add_df
             base_df = pd.concat([base_df, tmp_df], ignore_index=True)
             del tmp_df
-            gc.collect()  # 👈 1枚マージするたびにゴミ箱を空にする
+            gc.collect()
             
     del xl
     gc.collect()
@@ -252,7 +250,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['現在の在庫'] = pd.to_numeric(df_zai_in_zai[base_date], errors='coerce')
                 df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫']).apply(lambda x: max(0, x))
 
-                # 🌟 メモリ掃除①：在庫リストの生データを即座に破棄
                 del df_zai_raw, df_zai_fixed
                 gc.collect()
 
@@ -283,7 +280,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_m_clean['選択月_計画残数'] = (df_m_clean['選択月_製造予定'] - df_m_clean['選択月_製造実績']).apply(lambda x: max(0, x))
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (~df_m_clean['品目コード'].isin(['nan', '', 'None']))].drop_duplicates(subset=['品目コード'])
 
-                # 🌟 メモリ掃除②：一番重い計画書エクセル生データをここで全消去！
                 del df_monthly_raw, df_m, df_m_clean
                 gc.collect()
 
@@ -339,7 +335,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]).copy()
 
-                # 🌟 メモリ掃除③：タイムライン生成前に中間テーブルを全消去
                 del df_master_combined, df_final, grouped
                 gc.collect()
 

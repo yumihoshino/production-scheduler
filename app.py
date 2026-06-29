@@ -47,7 +47,7 @@ file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・名寄せ覚醒: 🌟ボタンを押したその場でBKコードのハッシュ辞書を生成する完全結合仕様！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・完全勝利: 🌟アルファベットや文字型の罠を全消去して数字だけで強制名寄せする無敵仕様！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -63,7 +63,7 @@ st.sidebar.info(
 )
 
 # =====================================================================
-# 🌟 最上流グローバル・独立パーサー関数群（メモリ掃除機つき）
+# 🌟 最上流グローバル・独立パーサー関数群
 # =====================================================================
 
 def safe_seek(f):
@@ -77,14 +77,14 @@ def load_excel_sheets_merged(file, keywords):
         safe_seek(file)
         df_single = pd.read_excel(file, sheet_name=0, header=None)
         return df_single
-    
+
     base_df = pd.read_excel(xl, sheet_name=matched_sheets[0], header=None)
     item_row_idx = 1
     for i in range(min(15, len(base_df))):
         row_vals = [str(v).strip() for v in base_df.iloc[i].values]
         if any(k in row_vals for k in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE']):
             item_row_idx = i; break
-            
+
     for sheet in matched_sheets[1:]:
         add_df = pd.read_excel(xl, sheet_name=sheet, header=None)
         if len(add_df) > item_row_idx + 1:
@@ -93,7 +93,7 @@ def load_excel_sheets_merged(file, keywords):
             base_df = pd.concat([base_df, tmp_df], ignore_index=True)
             del tmp_df
             gc.collect()
-            
+
     del xl
     gc.collect()
     return base_df
@@ -103,7 +103,7 @@ def clean_bom_master(df_raw_bom):
     h_row = 0
     for i in range(min(15, len(df_raw_bom))):
         row_vals = [str(v).strip() for v in df_raw_bom.iloc[i].values]
-        if any(k in row_vals for k in ['品目コード', '商品コード', '商品CODE', '配合CODE', '配合コード']):
+        if any(k in row_vals for k in ['品目コード', '商品コード', '商品CODE', '配合CODE', '配合コード', '親品目コード']):
             h_row = i; break
     df_clean = df_raw_bom.iloc[h_row+1:].copy()
     df_clean.columns = [str(c).strip() for c in df_raw_bom.iloc[h_row].values]
@@ -124,7 +124,7 @@ def sort_jobs_by_size_proximity(df_line):
     processed = []
     first_recipe = unprocessed[0]['中身設計コード']
     same_recipe_jobs = [j for j in unprocessed if j['中身設計コード'] == first_recipe]
-    same_recipe_jobs.sort(key=lambda x: x['容量_L'], reverse=True) 
+    same_recipe_jobs.sort(key=lambda x: x['容量_L'], reverse=True)
     processed.extend(same_recipe_jobs)
     for j in same_recipe_jobs: unprocessed.remove(j)
     while unprocessed:
@@ -187,10 +187,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if file_bom is not None:
                     safe_seek(file_bom)
                     if file_bom.name.endswith('.csv'):
-                        try: df_bom = clean_bom_master(pd.read_csv(file_bom, encoding='utf-8', header=None))
+                        try: df_bom = pd.read_csv(file_bom, encoding='utf-8')
                         except:
                             safe_seek(file_bom)
-                            df_bom = clean_bom_master(pd.read_csv(file_bom, encoding='cp932', header=None))
+                            df_bom = pd.read_csv(file_bom, encoding='cp932')
                     else: df_bom = clean_bom_master(load_excel_sheets_merged(file_bom, ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"]))
                 elif 'bom_data' in st.session_state:
                     df_bom = st.session_state['bom_data']
@@ -203,14 +203,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
                     except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
 
-                # 関西マスタ誤爆チェック検問
-                if df_bom is not None and not df_bom.empty and factory_mode == "関西工場":
-                    has_bk = False
-                    for col in df_bom.columns:
-                        if df_bom[col].astype(str).str.contains('BK').any():
-                            has_bk = True; break
-                    if not has_bk:
-                        df_bom = None
+                # ※ 関西工場BK検問を削除 → BOMを正しく読み込むため
 
                 # 計画書エクセル内から吸い上げ
                 if df_bom is None and file_gekkan is not None:
@@ -232,19 +225,40 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     st.error("エラー: 構成表マスタが見つかりません。")
                     st.stop()
 
-                # 🌟【大修正：名寄せの核心】読み込まれた最新マスタから「その場」で爆速ハッシュ辞書を強制再生成！
+                # =====================================================================
+                # 🌟【修正版】BOMルックアップ辞書の生成
+                # 列名を拡張：「親品目コード」→「子品目コード」にも対応
+                # BK始まりの配合コードを優先採用
+                # =====================================================================
                 bom_lookup_dict = {}
                 if not df_bom.empty:
-                    p_col = next((c for c in df_bom.columns if c in ['商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[2] if len(df_bom.columns) > 2 else df_bom.columns[0])
-                    c_col = next((c for c in df_bom.columns if c in ['配合CODE', '配合コード', '配合CD', '中身コード']), df_bom.columns[0])
-                    for _, r in df_bom.iterrows():
-                        pv = str(r[p_col]).strip(); cv = str(r[c_col]).strip()
-                        if pv not in bom_lookup_dict or cv.startswith(('BH', 'BK')):
-                            bom_lookup_dict[pv] = cv
+                    # 親品目コード列を特定（優先順に検索）
+                    p_col = next((c for c in df_bom.columns if c in [
+                        '親品目コード', '商品CODE', '商品コード', '品目コード', '商品CD'
+                    ]), df_bom.columns[0])
 
-                # 🌟【インライン関数化】確定した最新辞書を確実に100%参照させる防弾ロジック
+                    # 子品目コード（配合コード）列を特定（優先順に検索）
+                    c_col = next((c for c in df_bom.columns if c in [
+                        '子品目コード', '配合CODE', '配合コード', '配合CD', '中身コード'
+                    ]), df_bom.columns[1])
+
+                    for _, r in df_bom.iterrows():
+                        pv_raw = str(r[p_col]).strip()
+                        cv = str(r[c_col]).strip()
+                        if '.' in pv_raw: pv_raw = pv_raw.split('.')[0]
+                        # KやHなどのプレフィックスを含めて数字のみ抽出してキーにする
+                        pv_clean = "".join(re.findall(r'\d+', pv_raw))
+                        if pv_clean:
+                            # BK始まりの配合コードを最優先で採用
+                            if pv_clean not in bom_lookup_dict or cv.startswith(('BK', 'BH')):
+                                bom_lookup_dict[pv_clean] = cv
+
+                # 🌟【インライン関数】品目コードから数字のみ抜き出してBOMマッチング
                 def extract_content_code(item_code):
-                    return bom_lookup_dict.get(str(item_code).strip(), item_code)
+                    item_str = str(item_code).strip()
+                    if '.' in item_str: item_str = item_str.split('.')[0]
+                    item_clean = "".join(re.findall(r'\d+', item_str))
+                    return bom_lookup_dict.get(item_clean, item_code)
 
                 # --- 在庫推移リスト読み込み ---
                 df_zai_raw = load_excel_sheets_merged(file_zai, ["在庫推移リスト", "在庫推移"])
@@ -275,7 +289,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 plan_col_idx = None; actual_col_idx = None
                 for search_c in range(len(df_monthly_raw.columns)):
-                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])  # 🌟タイポ完全修復
+                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])
                     if ('予定' in col_text or '計画' in col_text) and plan_col_idx is None: plan_col_idx = search_c
                     elif '実績' in col_text and actual_col_idx is None: actual_col_idx = search_c
 
@@ -329,8 +343,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 grouped['製造決定_m3'] = grouped['純計算_m3_ロス込'].apply(lambda m3: 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0)))
 
                 df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3']], on='中身設計コード', how='left')
-                df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0) 
-                
+                df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0)
+
                 total_vol_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_vol_recipe).fillna(1.0)
                 df_final['製品化容量_L'] = ((df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']).fillna(0.0)
@@ -365,17 +379,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                     loop_d = get_next_w_date(start_date, holidays_input)
                     day_cnt = 1; sched = []
-                    
+
                     while True:
                         active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and job_can_support(l, j, factory_mode) for ol in lines_list if ol != l for j in queues[ol])]
                         if not active: break
-                        
+
                         run_today = active if factory_mode == "関西工場" else ([l for l in ['2号機', '3号機', '5号機', '6号機'] if l in active] if len(active) == 4 else ([l for l in ['3号機', '5号機'] if l in active] if any(l in active for l in ['3号機', '5号機']) and ('5号機' in active or not any(l in active for l in ['2号機', '6号機'])) else [l for l in ['2号機', '6号機'] if l in active]))
-                        
+
                         cap_limit = (400.0 if loop_d.weekday() == 4 else 430.0) + ov_mins
                         w_kanji = ["月", "火", "水", "木", "金", "土", "日"][loop_d.weekday()]
                         d_str_disp = loop_d.strftime("%Y/%m/%d")
-                        
+
                         for line in run_today:
                             spent = 0.0; p_rec = None; p_vol = None
                             while spent < cap_limit:
@@ -385,10 +399,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     sw = 5.0 if spent > 0 and p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
                                     avail = cap_limit - spent - sw
                                     if avail <= 5.0: break
-                                    
+
                                     sp_min = get_sp(line, job['容量_L'], factory_mode) / 60
                                     max_b = avail * sp_min
-                                    
+
                                     if job['rem'] <= max_b:
                                         b_make = job['rem']; dur = b_make / sp_min
                                         sched.append({'稼働日': f"{day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': '全量完了', '製造理由': job['製造理由'], 't_start': spent + sw, 't_end': spent + sw + dur})

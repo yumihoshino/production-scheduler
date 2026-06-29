@@ -43,11 +43,12 @@ else:
     file_gekkan = st.sidebar.file_uploader("② 関西工場 月間製造計画書 (Excel形式: .xlsx)", type=["xlsx"])
 
 file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (ExcelまたはCSV)", type=["xlsx", "csv"])
+file_jisseki = st.sidebar.file_uploader("④ [任意] 製造実績レポート (Excel形式: .xlsx)", type=["xlsx"])
 
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 5号, 6号, その他\n・完全勝利: 🌟アルファベットや文字型の罠を全消去して数字だけで強制名寄せする無敵仕様！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 4号, 5号, 6号, その他\n・完全勝利: 🌟アルファベットや文字型の罠を全消去して数字だけで強制名寄せする無敵仕様！"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -111,10 +112,8 @@ def clean_bom_master(df_raw_bom):
 
 def extract_volume_safe(name_str):
     n_str = str(name_str)
-    # 例外：真砂土15kgは便宜上12L換算
     if '真砂土' in n_str and '15' in n_str:
         return 12
-    # kg品（化成肥料など）は負数で返して区別する
     kg_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:[kKｋＫ][gGｇＧ])', n_str)
     if kg_match:
         try: return -int(float(kg_match.group(1)))
@@ -127,11 +126,9 @@ def extract_volume_safe(name_str):
     else: return 14
 
 def is_kg_product(name_str):
-    """kg単位の商品かどうか判定"""
     return bool(re.search(r'\d+(?:\.\d+)?\s*[kKｋＫ][gGｇＧ]', str(name_str)))
 
 def get_kg_weight(name_str):
-    """kg商品の重量を返す（例: 1kg→1, 600g→0.6）"""
     n_str = str(name_str)
     kg_match = re.search(r'(\d+(?:\.\d+)?)\s*[kKｋＫ][gGｇＧ]', n_str)
     if kg_match:
@@ -167,17 +164,27 @@ def sort_jobs_by_size_proximity(df_line):
 
 def job_can_support(l_key, job_item, f_mode):
     if f_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
-    else: return (l_key == '5号機' and job_item['容量_L'] < 10 or l_key == '2号機' and 10 <= job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']
+    else: return (l_key == '5号機' and job_item['容量_L'] < 10 or l_key == '2号機' and 10 <= job_item['容量_L'] <= 25 or l_key == '4号機' and job_item['容量_L'] < 10) and not job_item['堆肥・腐葉土フラグ']
 
 def get_next_w_date(cur, holidays_list):
     nd = cur
     while nd.weekday() >= 5 or nd in holidays_list: nd += datetime.timedelta(days=1)
     return nd
 
+# 4号機：品目コードごとの実績平均速度（袋/時間）
+SPEED_4GO = {
+    'K0270430': 214,
+    'K0425010': 78,
+    'K0521190': 51,
+    'K0571080': 140,
+}
+SPEED_4GO_DEFAULT = 100  # 実績なし品目のデフォルト
+
 def get_sp(line, vol, f_mode, item_code=''):
-    # K0225系専用培養土12Lは5号機で490袋/時間
     if f_mode == "関西工場" and line == '5号機' and str(item_code).startswith('K0225') and vol == 12:
         return 490
+    if f_mode == "関西工場" and line == '4号機':
+        return SPEED_4GO.get(str(item_code), SPEED_4GO_DEFAULT)
     if f_mode == "本社": return 400 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 250)) if line == '3号機' else ((730 if vol in [12, 14] else 650) if line == '5号機' else 260))
     else: return 388 if line == '1号機' else (500 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 191)) if line == '3号機' else (646 if line == '5号機' else (480 if line == '6号機' else 107))))
 
@@ -200,6 +207,13 @@ if has_local_master or has_master_in_gekkan:
     st.sidebar.success("🟢 構成表マスタ: 読込済み (スタンバイOK)")
 else:
     st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
+
+# 実績レポートのスタンバイチェック
+has_jisseki = (file_jisseki is not None) or ('jisseki_data' in st.session_state) or os.path.exists("jisseki_local.csv")
+if has_jisseki:
+    st.sidebar.success("🟢 製造実績レポート: 読込済み (スタンバイOK)")
+else:
+    st.sidebar.info("ℹ️ 製造実績レポート未登録（ルールベースで動作）")
 
 # =====================================================================
 
@@ -386,7 +400,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_vol_recipe).fillna(1.0)
 
                 def calc_bags(r):
-                    # CLEAR ERAシリーズ：ロット計算なし、採用ベース数量をそのまま袋数に
                     if 'CLEAR' in str(r['品目名']) and 'ERA' in str(r['品目名']):
                         return int(r['採用ベース数量'])
                     if r['kg品フラグ_g'] if 'kg品フラグ_g' in r else r.get('kg品フラグ', False):
@@ -407,6 +420,59 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 else:
                     recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
 
+                    # 製造実績レポートから品目コード→最多使用ラインの辞書を構築（永続保存対応）
+                    jisseki_line_dict = {}
+
+                    def parse_jisseki(df_j):
+                        df_j.columns = [str(c).strip() for c in df_j.columns]
+                        line_col = next((c for c in df_j.columns if '設備名' in c), None)
+                        code_col = next((c for c in df_j.columns if '品目コード' in c), None)
+                        qty_col  = next((c for c in df_j.columns if '製造良品数' in c and '予算' not in c and '到達' not in c and '差異' not in c), None)
+                        result = {}
+                        if line_col and code_col and qty_col:
+                            df_j = df_j[[line_col, code_col, qty_col]].copy()
+                            df_j.columns = ['設備名', '品目コード', '良品数']
+                            df_j['品目コード'] = df_j['品目コード'].astype(str).str.strip()
+                            df_j['良品数'] = pd.to_numeric(df_j['良品数'], errors='coerce').fillna(0)
+                            df_j['設備名'] = df_j['設備名'].ffill()
+                            EXCLUDE_LINES = {'(なし)', 'nan', ''}
+                            df_j = df_j[~df_j['設備名'].astype(str).isin(EXCLUDE_LINES)]
+                            df_j = df_j[df_j['品目コード'].str.startswith('K')]
+                            df_j['ライン'] = df_j['設備名'].astype(str).str.extract(r'(\d+号機)')
+                            df_j = df_j.dropna(subset=['ライン'])
+                            df_j['ライン'] = df_j['ライン'] + '機'
+                            grp = df_j.groupby(['品目コード', 'ライン'])['良品数'].sum().reset_index()
+                            for code_j, grp_df in grp.groupby('品目コード'):
+                                best_line = grp_df.loc[grp_df['良品数'].idxmax(), 'ライン']
+                                result[code_j] = best_line
+                        return result
+
+                    if file_jisseki is not None:
+                        try:
+                            safe_seek(file_jisseki)
+                            df_j = pd.read_excel(file_jisseki, header=3)
+                            jisseki_line_dict = parse_jisseki(df_j)
+                            st.session_state['jisseki_data'] = df_j
+                            df_j.to_csv("jisseki_local.csv", index=False, encoding='utf-8')
+                            st.sidebar.success(f"🟢 実績レポート新規登録 ({len(jisseki_line_dict)}品目)")
+                        except Exception as e:
+                            st.sidebar.warning(f"⚠️ 実績レポート読込エラー: {e}")
+                    elif 'jisseki_data' in st.session_state:
+                        try:
+                            jisseki_line_dict = parse_jisseki(st.session_state['jisseki_data'])
+                        except: pass
+                    elif os.path.exists("jisseki_local.csv"):
+                        try:
+                            df_j = pd.read_csv("jisseki_local.csv", encoding='utf-8')
+                            jisseki_line_dict = parse_jisseki(df_j)
+                            st.session_state['jisseki_data'] = df_j
+                        except:
+                            try:
+                                df_j = pd.read_csv("jisseki_local.csv", encoding='cp932')
+                                jisseki_line_dict = parse_jisseki(df_j)
+                                st.session_state['jisseki_data'] = df_j
+                            except: pass
+
                     def assign_line_kansai(r):
                         name = r['品目名']
                         vol = r['容量_L']
@@ -414,33 +480,27 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         is_compost = r['堆肥・腐葉土フラグ']
                         is_special = any(k in name for k in ['再生材', 'もう一土元気'])
 
-                        # 例外固定：K0390110は3号機
+                        # 例外固定・手詰め品は実績より優先
+                        FIXED_CODES_SONOTA = ('K0430120', 'K0270450', 'K0490080', 'K0190010')
+
                         if code == 'K0390110':
                             return '3号機'
-
-                        # 手詰商品：K0430120, K0270450はその他
-                        if code in ('K0430120', 'K0270450'):
+                        if code in FIXED_CODES_SONOTA:
                             return 'その他'
-
-                        # CLEAR ERAシリーズは手詰め → その他
                         if 'CLEAR' in name and 'ERA' in name:
                             return 'その他'
+                        if '有機石灰' in name:
+                            return 'その他'
+                        if is_kg_product(name) and get_kg_weight(name) < 1.0:
+                            return '4号機'
+
+                        # 🌟 製造実績レポートに実績があればそちらを優先
+                        if code in jisseki_line_dict:
+                            return jisseki_line_dict[code]
 
                         # K0225系 専用培養土12Lは5号機（490袋/時間）
                         if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
                             return '5号機'
-
-                        # 半自動商品：有機石灰を含むものはその他
-                        if '有機石灰' in name:
-                            return 'その他'
-
-                        # 化成肥料（コーナン）は5号機
-                        if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
-                            return '5号機'
-
-                        # 1kg未満（600gなど）はその他（手詰・半自動）
-                        if is_kg_product(name) and get_kg_weight(name) < 1.0:
-                            return 'その他'
 
                         # 40L以上の堆肥・再生材は1号機
                         if (is_compost or is_special) and vol >= 40:
@@ -461,7 +521,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if vol <= 20:
                             recipe_bags = recipe_total_bags.get(r.get('中身設計コード', ''), 0)
                             return '6号機' if recipe_bags >= 300 else '2号機'
-                        # 20L超〜25L未満は2号機
                         return '2号機'
 
                     df_final['製造ライン'] = df_final.apply(assign_line_kansai, axis=1)
@@ -475,7 +534,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 del df_master_combined, df_final, grouped
                 gc.collect()
 
-                lines_list = ["1号機", "2号機", "3号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機"]
+                lines_list = ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機"]
                 queues_base = {line: sort_jobs_by_size_proximity(df_final_sorted[df_final_sorted['製造ライン'] == line]) for line in lines_list}
 
                 def run_sim(ov_mins):
@@ -587,7 +646,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 for (ds, ddt) in u_days:
                     wk = ["月", "火", "水", "木", "金", "土", "日"][datetime.datetime.strptime(ddt, "%Y/%m/%d").weekday()]
                     for ln in lines_list:
-                        ldisp = {"1号機": "NO.1", "2号機": "NO.2", "3号機": "NO.3", "5号機": "NO.5", "6号機": "NO.6"}.get(ln, ln)
+                        ldisp = {"1号機": "NO.1", "2号機": "NO.2", "3号機": "NO.3", "4号機": "NO.4", "5号機": "NO.5", "6号機": "NO.6"}.get(ln, ln)
                         row_arr = [ds, f"{ddt} ({wk})", ldisp] + [""] * 25
                         ws3.append(row_arr)
                         mat_map[(ds, ln)] = ws3[ws3.max_row]

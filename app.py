@@ -386,7 +386,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_vol_recipe).fillna(1.0)
 
                 def calc_bags(r):
-                    if r.get('kg品フラグ_g', r.get('kg品フラグ', False)):
+                    # CLEAR ERAシリーズ：ロット計算なし、採用ベース数量をそのまま袋数に
+                    if 'CLEAR' in str(r['品目名']) and 'ERA' in str(r['品目名']):
+                        return int(r['採用ベース数量'])
+                    if r['kg品フラグ_g'] if 'kg品フラグ_g' in r else r.get('kg品フラグ', False):
                         unit_kg = r['kg重量'] if r['kg重量'] > 0 else 1.0
                         return int(round((r['製造決定_m3'] * r['分配比率']) / unit_kg))
                     else:
@@ -417,6 +420,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                         # 手詰商品：K0430120, K0270450はその他
                         if code in ('K0430120', 'K0270450'):
+                            return 'その他'
+
+                        # CLEAR ERAシリーズは手詰め → その他
+                        if 'CLEAR' in name and 'ERA' in name:
                             return 'その他'
 
                         # K0225系 専用培養土12Lは5号機（490袋/時間）
@@ -450,10 +457,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         # 25L以上は1号機
                         if vol >= 25:
                             return '1号機'
-                        # 10L〜20L: 大ロット（合計700袋以上）は6号機、それ以外は2号機
+                        # 10L〜20L: 大ロット（合計300袋以上）は6号機、それ以外は2号機
                         if vol <= 20:
                             recipe_bags = recipe_total_bags.get(r.get('中身設計コード', ''), 0)
-                            return '6号機' if recipe_bags >= 700 else '2号機'
+                            return '6号機' if recipe_bags >= 300 else '2号機'
                         # 20L超〜25L未満は2号機
                         return '2号機'
 

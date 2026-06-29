@@ -144,7 +144,7 @@ def sort_jobs_by_size_proximity(df_line):
 
 def job_can_support(l_key, job_item, f_mode):
     if f_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
-    else: return (l_key == '5号機' and job_item['容量_L'] <= 14 or l_key == '2号機' and job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']
+    else: return (l_key == '5号機' and job_item['容量_L'] < 10 or l_key == '2号機' and 10 <= job_item['容量_L'] <= 25) and not job_item['堆肥・腐葉土フラグ']
 
 def get_next_w_date(cur, holidays_list):
     nd = cur
@@ -311,7 +311,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         '進捗状況', '製造進捗状況', '小計', '総合計', '合　計',
                         '品目ｺｰﾄﾞ', '品目cd', '品目ｃｄ', ''
                     }
-                    # 数字を一切含まないコード（純粋な日本語・記号のみ）も除外
                     if code in EXCLUDE_CODES or not re.search(r'\d', str(code)) or (factory_mode == "関西工場" and str(code).startswith('H')): continue
                     zai_row = df_zai_in_zai[df_zai_in_zai['品目コード'] == code]
                     plan_row = df_m_distinct[df_m_distinct['品目コード'] == code]
@@ -353,7 +352,41 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if factory_mode == "本社":
                     df_final['製造ライン'] = df_final.apply(lambda r: '3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ'] else ('5号機' if r['容量_L'] <= 12 else ('2号機' if r['容量_L'] <= 20 else '6号機')), axis=1)
                 else:
-                    df_final['製造ライン'] = df_final.apply(lambda r: '3号機' if any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ'] else ('5号機' if r['容量_L'] <= 12 else ('1号機' if r['容量_L'] >= 25 else ('6号機' if r['容量_L'] <= 20 else '2号機'))), axis=1)
+                    # 関西工場ライン割り当てルール：
+                    # 1号機: 25L以上（堆肥・腐葉土でも40L以上は1号機）
+                    # 2号機: 10L〜25L（1号機とメインペア。小ロット・切り替え多め品を担当）
+                    # 3号機: 再生材・もう一土元気・堆肥・腐葉土（40L未満まで）
+                    # 5号機: 10L未満
+                    # 6号機: 10L〜20L のうち合計700袋以上の大ロット品（切り替え少なく高速稼働）
+
+                    # 配合レシピごとの合計袋数を計算（6号機振り分け判定用）
+                    recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
+
+                    def assign_line_kansai(r):
+                        name = r['品目名']
+                        vol = r['容量_L']
+                        is_compost = r['堆肥・腐葉土フラグ']
+                        is_special = any(k in name for k in ['再生材', 'もう一土元気'])
+                        # 40L以上の堆肥・再生材は1号機
+                        if (is_compost or is_special) and vol >= 40:
+                            return '1号機'
+                        # 堆肥・腐葉土・再生材は3号機（40L未満）
+                        if is_compost or is_special:
+                            return '3号機'
+                        # 10L未満は5号機
+                        if vol < 10:
+                            return '5号機'
+                        # 25L以上は1号機
+                        if vol >= 25:
+                            return '1号機'
+                        # 10L〜20L: 大ロット（合計700袋以上）は6号機、それ以外は2号機
+                        if vol <= 20:
+                            recipe_bags = recipe_total_bags.get(r.get('中身設計コード', ''), 0)
+                            return '6号機' if recipe_bags >= 700 else '2号機'
+                        # 20L超〜25L未満は2号機
+                        return '2号機'
+
+                    df_final['製造ライン'] = df_final.apply(assign_line_kansai, axis=1)
 
                 df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode)) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)

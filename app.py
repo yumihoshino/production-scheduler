@@ -114,7 +114,7 @@ def extract_volume_safe(name_str):
     # 例外：真砂土15kgは便宜上12L換算
     if '真砂土' in n_str and '15' in n_str:
         return 12
-    # kg品（化成肥料など）は負数で返して区別する（-1 → 1kg, -10 → 10kg）
+    # kg品（化成肥料など）は負数で返して区別する
     kg_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:[kKｋＫ][gGｇＧ])', n_str)
     if kg_match:
         try: return -int(float(kg_match.group(1)))
@@ -174,7 +174,10 @@ def get_next_w_date(cur, holidays_list):
     while nd.weekday() >= 5 or nd in holidays_list: nd += datetime.timedelta(days=1)
     return nd
 
-def get_sp(line, vol, f_mode):
+def get_sp(line, vol, f_mode, item_code=''):
+    # K0225系専用培養土12Lは5号機で490袋/時間
+    if f_mode == "関西工場" and line == '5号機' and str(item_code).startswith('K0225') and vol == 12:
+        return 490
     if f_mode == "本社": return 400 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 250)) if line == '3号機' else ((730 if vol in [12, 14] else 650) if line == '5号機' else 260))
     else: return 388 if line == '1号機' else (500 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 191)) if line == '3号機' else (646 if line == '5号機' else (480 if line == '6号機' else 107))))
 
@@ -399,7 +402,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if factory_mode == "本社":
                     df_final['製造ライン'] = df_final.apply(lambda r: '3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ'] else ('5号機' if r['容量_L'] <= 12 else ('2号機' if r['容量_L'] <= 20 else '6号機')), axis=1)
                 else:
-                    # 関西工場ライン割り当てルール
                     recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
 
                     def assign_line_kansai(r):
@@ -413,9 +415,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if code == 'K0390110':
                             return '3号機'
 
-                        # 手詰商品：K0430120はその他
-                        if code == 'K0430120':
+                        # 手詰商品：K0430120, K0270450はその他
+                        if code in ('K0430120', 'K0270450'):
                             return 'その他'
+
+                        # K0225系 専用培養土12Lは5号機（490袋/時間）
+                        if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
+                            return '5号機'
 
                         # 半自動商品：有機石灰を含むものはその他
                         if '有機石灰' in name:
@@ -453,7 +459,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                     df_final['製造ライン'] = df_final.apply(assign_line_kansai, axis=1)
 
-                df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode)) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
+                df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                 df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
 
@@ -494,7 +500,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     avail = cap_limit - spent - sw
                                     if avail <= 5.0: break
 
-                                    sp_min = get_sp(line, job['容量_L'], factory_mode) / 60
+                                    sp_min = get_sp(line, job['容量_L'], factory_mode, job['品目コード']) / 60
                                     max_b = avail * sp_min
 
                                     if job['rem'] <= max_b:

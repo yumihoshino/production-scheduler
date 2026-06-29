@@ -111,12 +111,35 @@ def clean_bom_master(df_raw_bom):
 
 def extract_volume_safe(name_str):
     n_str = str(name_str)
-    match = re.search(r'(\d+(?:\.\d+)?)\s*(?:[LLｌｌＬＬ]|[kKｋＫ][gGｇＧ]?)', n_str)
-    if match:
-        try: return int(float(match.group(1)))
+    # 例外：真砂土15kgは便宜上12L換算
+    if '真砂土' in n_str and '15' in n_str:
+        return 12
+    # kg品（化成肥料など）は負数で返して区別する（-1 → 1kg, -10 → 10kg）
+    kg_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:[kKｋＫ][gGｇＧ])', n_str)
+    if kg_match:
+        try: return -int(float(kg_match.group(1)))
+        except: return 14
+    l_match = re.search(r'(\d+(?:\.\d+)?)\s*[LLｌｌＬＬ]', n_str)
+    if l_match:
+        try: return int(float(l_match.group(1)))
         except: return 14
     elif '特大袋' in n_str: return 55
     else: return 14
+
+def is_kg_product(name_str):
+    """kg単位の商品かどうか判定"""
+    return bool(re.search(r'\d+(?:\.\d+)?\s*[kKｋＫ][gGｇＧ]', str(name_str)))
+
+def get_kg_weight(name_str):
+    """kg商品の重量を返す（例: 1kg→1, 600g→0.6）"""
+    n_str = str(name_str)
+    kg_match = re.search(r'(\d+(?:\.\d+)?)\s*[kKｋＫ][gGｇＧ]', n_str)
+    if kg_match:
+        return float(kg_match.group(1))
+    g_match = re.search(r'(\d+(?:\.\d+)?)\s*[gGｇＧ]', n_str)
+    if g_match:
+        return float(g_match.group(1)) / 1000
+    return 1.0
 
 def sort_jobs_by_size_proximity(df_line):
     unprocessed = df_line.to_dict('records')
@@ -202,8 +225,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 elif os.path.exists("bom_master.csv"):
                     try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
                     except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
-
-                # ※ 関西工場BK検問を削除 → BOMを正しく読み込むため
 
                 if df_bom is None and file_gekkan is not None:
                     try:
@@ -330,20 +351,46 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_master_combined = df_master_combined[df_master_combined['採用ベース数量'] > 0].copy()
 
                 df_master_combined['容量_L'] = df_master_combined['品目名'].apply(extract_volume_safe)
-                df_master_combined['ベース必要容量_L'] = df_master_combined['採用ベース数量'] * df_master_combined['容量_L']
+                df_master_combined['kg品フラグ'] = df_master_combined['品目名'].apply(is_kg_product)
+                df_master_combined['kg重量'] = df_master_combined['品目名'].apply(get_kg_weight)
+                df_master_combined['ベース必要容量_L'] = df_master_combined.apply(
+                    lambda r: r['採用ベース数量'] * r['kg重量'] if r['kg品フラグ'] else r['採用ベース数量'] * max(r['容量_L'], 1),
+                    axis=1
+                )
                 df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
-                grouped = df_master_combined.groupby('中身設計コード').agg({'ベース必要容量_L': 'sum'}).reset_index()
-                grouped['純計算_m3_ロス込'] = (grouped['ベース必要容量_L'] / 0.9) / 1000
-                grouped['製造決定_m3'] = grouped['純計算_m3_ロス込'].apply(lambda m3: 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0)))
+                def calc_batch(group_df):
+                    name = group_df['品目名'].iloc[0]
+                    is_kasei = '化成肥料' in name and 'ｺｰﾅﾝ' in name
+                    total = group_df['ベース必要容量_L'].sum()
+                    if is_kasei:
+                        batches = math.ceil(total / 1000)
+                        return float(batches * 1000)
+                    else:
+                        m3 = (total / 0.9) / 1000
+                        return 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0))
 
-                df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3']], on='中身設計コード', how='left')
+                grouped = df_master_combined.groupby('中身設計コード').apply(
+                    lambda g: pd.Series({'ベース必要容量_L': g['ベース必要容量_L'].sum(),
+                                         '製造決定_m3': calc_batch(g),
+                                         'kg品フラグ': g['kg品フラグ'].any()})
+                ).reset_index()
+
+                df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3', 'kg品フラグ']], on='中身設計コード', how='left', suffixes=('', '_g'))
                 df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0)
 
                 total_vol_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_vol_recipe).fillna(1.0)
-                df_final['製品化容量_L'] = ((df_final['製造決定_m3'] * 1000 * 0.9) * df_final['分配比率']).fillna(0.0)
-                df_final['計画製造袋数'] = (df_final['製品化容量_L'] / df_final['容量_L']).replace([np.inf, -np.inf], np.nan).fillna(0.0).round().astype(int)
+
+                def calc_bags(r):
+                    if r.get('kg品フラグ_g', r.get('kg品フラグ', False)):
+                        unit_kg = r['kg重量'] if r['kg重量'] > 0 else 1.0
+                        return int(round((r['製造決定_m3'] * r['分配比率']) / unit_kg))
+                    else:
+                        vol = max(r['容量_L'], 1)
+                        return int(round((r['製造決定_m3'] * 1000 * 0.9 * r['分配比率']) / vol))
+
+                df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
 
                 df_final['製造理由'] = df_final.apply(lambda r: '現在庫がマイナス' if not pd.isna(r['現在の在庫']) and r['現在の在庫'] < 0 else ('安全在庫割れ' if r['安全割れ不足数'] > 0 else '計画未達'), axis=1)
                 df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1)
@@ -352,27 +399,45 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if factory_mode == "本社":
                     df_final['製造ライン'] = df_final.apply(lambda r: '3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ'] else ('5号機' if r['容量_L'] <= 12 else ('2号機' if r['容量_L'] <= 20 else '6号機')), axis=1)
                 else:
-                    # 関西工場ライン割り当てルール：
-                    # 1号機: 25L以上（堆肥・腐葉土でも40L以上は1号機）
-                    # 2号機: 10L〜25L（1号機とメインペア。小ロット・切り替え多め品を担当）
-                    # 3号機: 再生材・もう一土元気・堆肥・腐葉土（40L未満まで）
-                    # 5号機: 10L未満
-                    # 6号機: 10L〜20L のうち合計700袋以上の大ロット品（切り替え少なく高速稼働）
-
-                    # 配合レシピごとの合計袋数を計算（6号機振り分け判定用）
+                    # 関西工場ライン割り当てルール
                     recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
 
                     def assign_line_kansai(r):
                         name = r['品目名']
                         vol = r['容量_L']
+                        code = r['品目コード']
                         is_compost = r['堆肥・腐葉土フラグ']
                         is_special = any(k in name for k in ['再生材', 'もう一土元気'])
+
+                        # 例外固定：K0390110は3号機
+                        if code == 'K0390110':
+                            return '3号機'
+
+                        # 手詰商品：K0430120はその他
+                        if code == 'K0430120':
+                            return 'その他'
+
+                        # 半自動商品：有機石灰を含むものはその他
+                        if '有機石灰' in name:
+                            return 'その他'
+
+                        # 化成肥料（コーナン）は5号機
+                        if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
+                            return '5号機'
+
+                        # 1kg未満（600gなど）はその他（手詰・半自動）
+                        if is_kg_product(name) and get_kg_weight(name) < 1.0:
+                            return 'その他'
+
                         # 40L以上の堆肥・再生材は1号機
                         if (is_compost or is_special) and vol >= 40:
                             return '1号機'
                         # 堆肥・腐葉土・再生材は3号機（40L未満）
                         if is_compost or is_special:
                             return '3号機'
+                        # kg品（化成肥料・真砂土以外）はその他
+                        if vol < 0:
+                            return 'その他'
                         # 10L未満は5号機
                         if vol < 10:
                             return '5号機'

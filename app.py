@@ -156,7 +156,7 @@ def get_sp(line, vol, f_mode):
     else: return 388 if line == '1号機' else (500 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 191)) if line == '3号機' else (646 if line == '5号機' else (480 if line == '6号機' else 107))))
 
 # =====================================================================
-# 🌟 マスタスタンバイ外側チェック（0.001秒の存在判定のみ）
+# 🌟 マスタスタンバイ外側チェック
 # =====================================================================
 
 has_local_master = os.path.exists("bom_master_local.csv") or os.path.exists("bom_master.xlsx") or os.path.exists("bom_master.csv") or ('bom_data' in st.session_state) or (file_bom is not None)
@@ -205,7 +205,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 # ※ 関西工場BK検問を削除 → BOMを正しく読み込むため
 
-                # 計画書エクセル内から吸い上げ
                 if df_bom is None and file_gekkan is not None:
                     try:
                         safe_seek(file_gekkan)
@@ -227,33 +226,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 # =====================================================================
                 # 🌟【修正版】BOMルックアップ辞書の生成
-                # 列名を拡張：「親品目コード」→「子品目コード」にも対応
-                # BK始まりの配合コードを優先採用
                 # =====================================================================
                 bom_lookup_dict = {}
                 if not df_bom.empty:
-                    # 親品目コード列を特定（優先順に検索）
                     p_col = next((c for c in df_bom.columns if c in [
                         '親品目コード', '商品CODE', '商品コード', '品目コード', '商品CD'
                     ]), df_bom.columns[0])
-
-                    # 子品目コード（配合コード）列を特定（優先順に検索）
                     c_col = next((c for c in df_bom.columns if c in [
                         '子品目コード', '配合CODE', '配合コード', '配合CD', '中身コード'
                     ]), df_bom.columns[1])
-
                     for _, r in df_bom.iterrows():
                         pv_raw = str(r[p_col]).strip()
                         cv = str(r[c_col]).strip()
                         if '.' in pv_raw: pv_raw = pv_raw.split('.')[0]
-                        # KやHなどのプレフィックスを含めて数字のみ抽出してキーにする
                         pv_clean = "".join(re.findall(r'\d+', pv_raw))
                         if pv_clean:
-                            # BK始まりの配合コードを最優先で採用
                             if pv_clean not in bom_lookup_dict or cv.startswith(('BK', 'BH')):
                                 bom_lookup_dict[pv_clean] = cv
 
-                # 🌟【インライン関数】品目コードから数字のみ抜き出してBOMマッチング
                 def extract_content_code(item_code):
                     item_str = str(item_code).strip()
                     if '.' in item_str: item_str = item_str.split('.')[0]
@@ -316,7 +306,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 all_codes = set(df_zai_in_zai['品目コード']).union(set(df_m_distinct[df_m_distinct['選択月_計画残数'] > 0]['品目コード']))
                 master_list = []
                 for code in all_codes:
-                    if code in ['合計', 'nan', '商品CD', '品目コード', 'None', '商品CODE'] or (factory_mode == "関西工場" and str(code).startswith('H')): continue
+                    EXCLUDE_CODES = {
+                        '合計', 'nan', '商品CD', '品目コード', 'None', '商品CODE',
+                        '進捗状況', '製造進捗状況', '小計', '総合計', '合　計',
+                        '品目ｺｰﾄﾞ', '品目cd', '品目ｃｄ', ''
+                    }
+                    # 数字を一切含まないコード（純粋な日本語・記号のみ）も除外
+                    if code in EXCLUDE_CODES or not re.search(r'\d', str(code)) or (factory_mode == "関西工場" and str(code).startswith('H')): continue
                     zai_row = df_zai_in_zai[df_zai_in_zai['品目コード'] == code]
                     plan_row = df_m_distinct[df_m_distinct['品目コード'] == code]
                     master_list.append({

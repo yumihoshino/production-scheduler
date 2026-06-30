@@ -25,7 +25,6 @@ st.sidebar.markdown("## 📅 カレンダー・目標設定")
 target_days = st.sidebar.number_input("当月の目標稼働日数 (この日数以内に作り切る)", min_value=1, max_value=31, value=20)
 
 # 製造計画月度の自動判定
-# ルール：今日が属する週（月〜土）に翌月1日が含まれる場合は翌月度扱い
 def _get_schedule_month(today):
     week_monday = today - datetime.timedelta(days=today.weekday())
     week_saturday = week_monday + datetime.timedelta(days=5)
@@ -66,7 +65,7 @@ file_jisseki = st.sidebar.file_uploader("④ [任意] 製造実績レポート (
 if factory_mode == "本社":
     rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 2号機、3号機、5号機、6号機"
 else:
-    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 4号, 5号, 6号, その他\n・完全勝利: 🌟アルファベットや文字型の罠を全消去して数字だけで強制名寄せする無敵仕様！"
+    rule_info = "・定時時間: 月〜木 430分(16:30終) / 金曜 400分(16:00終・メンテ)\n・稼働ライン: 1号, 2号, 3号, 4号, 5号, 6号, その他"
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 現場同期・固定ルール")
@@ -182,7 +181,22 @@ def sort_jobs_by_size_proximity(df_line):
 
 def job_can_support(l_key, job_item, f_mode):
     if f_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
-    else: return (l_key == '5号機' and job_item['容量_L'] < 10 or l_key == '2号機' and 10 <= job_item['容量_L'] <= 25 or l_key == '4号機' and job_item['容量_L'] < 10) and not job_item['堆肥・腐葉土フラグ']
+    else:
+        # K0225系専用培養土は袋形状が特殊なため5号機・4号機・その他のみ対応
+        if str(job_item.get('品目コード', '')).startswith('K0225'):
+            return False
+        # 化成肥料（コーナン）は5号機専用：他ラインの応援不可
+        name = str(job_item.get('品目名', ''))
+        if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
+            return False
+        # vol < 0 はkg品（化成肥料など）：応援対象外
+        vol = job_item['容量_L']
+        if vol < 0:
+            return False
+        # 4号機が応援できるのは在庫がマイナスの商品のみ
+        if l_key == '4号機' and job_item.get('製造理由', '') != '現在庫がマイナス':
+            return False
+        return (l_key == '5号機' and vol < 10 or l_key == '2号機' and 10 <= vol <= 25 or l_key == '4号機' and vol < 10) and not job_item['堆肥・腐葉土フラグ']
 
 def get_next_w_date(cur, holidays_list):
     nd = cur
@@ -195,6 +209,8 @@ SPEED_4GO = {
     'K0425010': 78,
     'K0521190': 51,
     'K0571080': 140,
+    'K0430120': 70,   # 実績平均 69.5袋/時間
+    'K0670290': 336,  # 実績平均 336袋/時間（4号機実績）
 }
 SPEED_4GO_DEFAULT = 100
 
@@ -448,9 +464,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             EXCLUDE_LINES = {'(なし)', 'nan', ''}
                             df_j = df_j[~df_j['設備名'].astype(str).isin(EXCLUDE_LINES)]
                             df_j = df_j[df_j['品目コード'].str.startswith('K')]
+                            # 「1号機：関西工場」→「1号機」に正規化（「機」を含む形で抽出）
                             df_j['ライン'] = df_j['設備名'].astype(str).str.extract(r'(\d+号機)')
                             df_j = df_j.dropna(subset=['ライン'])
-                            df_j['ライン'] = df_j['ライン'] + '機'
+                            # 抽出結果はすでに「X号機」の形なので「機」を追加しない
                             grp = df_j.groupby(['品目コード', 'ライン'])['良品数'].sum().reset_index()
                             for code_j, grp_df in grp.groupby('品目コード'):
                                 best_line = grp_df.loc[grp_df['良品数'].idxmax(), 'ライン']
@@ -490,12 +507,15 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         is_compost = r['堆肥・腐葉土フラグ']
                         is_special = any(k in name for k in ['再生材', 'もう一土元気'])
 
-                        FIXED_CODES_SONOTA = ('K0430120', 'K0270450', 'K0490080', 'K0190010')
+                        FIXED_CODES_SONOTA = ('K0270450', 'K0490080', 'K0190010')
 
-                        if code == 'K0390110':
+                        if code in ('K0390110', 'K0480080'):
                             return '3号機'
                         if code in FIXED_CODES_SONOTA:
                             return 'その他'
+                        # K0430120：実績は4号機のみ → 4号機固定
+                        if code == 'K0430120':
+                            return '4号機'
                         if 'CLEAR' in name and 'ERA' in name:
                             return 'その他'
                         if '有機石灰' in name:
@@ -545,6 +565,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 else:
                                     return '2号機'
 
+                        # 1.2L未満は4号機（5号機の最小製造可能容量は1.2L）
+                        if vol < 1.2:
+                            return '4号機'
                         # 10L未満は5号機
                         if vol < 10:
                             return '5号機'

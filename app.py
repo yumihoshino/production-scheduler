@@ -414,21 +414,40 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 bom_lookup_dict = {}
                 if not df_bom.empty:
-                    p_col = next((c for c in df_bom.columns if c in ['親品目コード', '商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[0])
-                    c_col = next((c for c in df_bom.columns if c in ['子品目コード', '配合CODE', '配合コード', '配合CD', '中身コード']), df_bom.columns[1])
+                    # 親品目コード列を特定（優先順に検索）
+                    p_col = next((c for c in df_bom.columns if c in [
+                        '親品目コード', '商品CODE', '商品コード', '品目コード', '商品CD'
+                    ]), df_bom.columns[0])
+
+                    # 子品目コード（配合コード）列を特定（優先順に検索）
+                    c_col = next((c for c in df_bom.columns if c in [
+                        '子品目コード', '配合CODE', '配合コード', '配合CD', '中身コード'
+                    ]), df_bom.columns[1])
+
                     for _, r in df_bom.iterrows():
                         pv_raw = str(r[p_col]).strip()
                         cv = str(r[c_col]).strip()
                         if '.' in pv_raw: pv_raw = pv_raw.split('.')[0]
-                        pv_clean = "".join(re.findall(r'\d+', pv_raw))
+                        # 🌟 工場プレフィックス（先頭のH/K等）を保持してキーを作る。
+                        # H始まり（本社）とK始まり（関西工場）は数字部分が同じでも別レシピのため、
+                        # 数字のみのキーだと衝突してしまう。先頭文字＋数字をキーにすることで防止する。
+                        pv_digits = "".join(re.findall(r'\d+', pv_raw))
+                        pv_prefix_match = re.match(r'^([A-Za-z]+)', pv_raw)
+                        pv_prefix = pv_prefix_match.group(1).upper() if pv_prefix_match else ''
+                        pv_clean = f"{pv_prefix}_{pv_digits}" if pv_digits else ''
                         if pv_clean:
+                            # BK/BH始まりの配合コードを最優先で採用
                             if pv_clean not in bom_lookup_dict or cv.startswith(('BK', 'BH')):
                                 bom_lookup_dict[pv_clean] = cv
 
+                # 🌟【インライン関数】品目コードから工場プレフィックス＋数字を抜き出してBOMマッチング
                 def extract_content_code(item_code):
                     item_str = str(item_code).strip()
                     if '.' in item_str: item_str = item_str.split('.')[0]
-                    item_clean = "".join(re.findall(r'\d+', item_str))
+                    item_digits = "".join(re.findall(r'\d+', item_str))
+                    item_prefix_match = re.match(r'^([A-Za-z]+)', item_str)
+                    item_prefix = item_prefix_match.group(1).upper() if item_prefix_match else ''
+                    item_clean = f"{item_prefix}_{item_digits}" if item_digits else ''
                     return bom_lookup_dict.get(item_clean, item_code)
 
                 # --- 在庫推移リスト読み込み ---
@@ -689,6 +708,12 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             else:
                                 return 'その他'
 
+                        # 化成肥料（コーナン）は5号機固定（490袋/時間）
+                        if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
+                            return '5号機'
+                        if code == 'K0630390':
+                            return '5号機'
+
                         # 🌟 製造実績レポートに実績があればそちらを優先
                         if code in jisseki_line_dict:
                             return jisseki_line_dict[code]
@@ -873,6 +898,15 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 s_rng = {0:(0,30), 1:(30,60), 2:(60,90), 3:(90,120), 4:(None,"休"), 5:(120,140), 6:(140,170), 7:(170,200), 8:(200,230), 9:(None,"昼"), 10:(230,260), 11:(260,290), 12:(290,320), 13:(320,350), 14:(None,"休"), 15:(350,370), 16:(370,400), 17:(400,430), 18:(430,460), 19:(460,490), 20:(490,520), 21:(520,550), 22:(550,580), 23:(580,610), 24:(610,640)}
 
+                # 製造理由ごとの色定義（優先度: マイナス在庫 > 安全在庫割れ > 計画未達）
+                REASON_FILLS = {
+                    '現在庫がマイナス': PatternFill(start_color="F8C9C4", end_color="F8C9C4", fill_type="solid"),  # 赤系
+                    '安全在庫割れ':     PatternFill(start_color="FCEAA4", end_color="FCEAA4", fill_type="solid"),  # 黄系
+                    '計画未達':         PatternFill(start_color="C9E4F8", end_color="C9E4F8", fill_type="solid"),  # 青系
+                }
+                REASON_PRIORITY = {'現在庫がマイナス': 3, '安全在庫割れ': 2, '計画未達': 1}
+                cell_reason_priority = {}
+
                 for j in full_sched:
                     t_cell_row = mat_map.get((j['稼働日'], j['製造ライン']))
                     if t_cell_row:
@@ -887,6 +921,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 add_t = f"{pfx}{j['品目名']}\n({j['指示数量(袋)']}袋)"
                                 t_cell_row[si+3].value = f"{cur_v}＋\n{add_t}" if cur_v else add_t
 
+                                cell_key = (t_cell_row[si+3].row, t_cell_row[si+3].column)
+                                this_priority = REASON_PRIORITY.get(j.get('製造理由', ''), 0)
+                                if this_priority > 0 and this_priority >= cell_reason_priority.get(cell_key, 0):
+                                    cell_reason_priority[cell_key] = this_priority
+                                    fill = REASON_FILLS.get(j['製造理由'])
+                                    if fill:
+                                        t_cell_row[si+3].fill = fill
+
                 for sheet in [ws1, ws2, ws3]:
                     sheet.row_dimensions[1].height = 26
                     for c in sheet[1]: c.fill = navy; c.font = w_font; c.alignment = Alignment(horizontal="center", vertical="center")
@@ -897,9 +939,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             c.font = r_font; c.border = b_all
                             if sheet==ws3:
                                 c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                                # 製造理由の色（赤・黄・青）が既に設定されたセルは上書きしない
+                                already_colored = (c.row, c.column) in cell_reason_priority
                                 if c.column in [2,3]: c.fill = PatternFill(start_color="DCE6F1", end_color="DCE6F1", fill_type="solid")
                                 elif c.column in [8,13,18]: c.fill = PatternFill(start_color="E4DFEC" if c.column==13 else "EAEAEA", end_color="E4DFEC" if c.column==13 else "EAEAEA", fill_type="solid"); c.font = b_font
-                                elif c.column>3 and is_z: c.fill = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
+                                elif c.column>3 and is_z and not already_colored: c.fill = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
                             else:
                                 if is_z: c.fill = PatternFill(start_color="F2F5F8", end_color="F2F5F8", fill_type="solid")
                                 c.alignment = Alignment(horizontal="right" if isinstance(c.value, (int,float)) else "left", vertical="center")

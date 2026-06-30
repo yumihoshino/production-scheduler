@@ -183,6 +183,9 @@ SPEED_4GO_DEFAULT = 100
 def get_sp(line, vol, f_mode, item_code=''):
     if f_mode == "関西工場" and line == '5号機' and str(item_code).startswith('K0225') and vol == 12:
         return 490
+    # 化成肥料10kg（K0630390）は5号機で490袋/時間
+    if f_mode == "関西工場" and line == '5号機' and str(item_code) == 'K0630390':
+        return 490
     if f_mode == "関西工場" and line == '4号機':
         return SPEED_4GO.get(str(item_code), SPEED_4GO_DEFAULT)
     if f_mode == "本社": return 400 if line == '2号機' else ((70 if vol == 55 else (100 if vol == 30 else 250)) if line == '3号機' else ((730 if vol in [12, 14] else 650) if line == '5号機' else 260))
@@ -484,6 +487,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if is_kg_product(name) and get_kg_weight(name) < 1.0:
                             return '4号機'
 
+                        # 化成肥料（コーナン）は5号機
+                        if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
+                            return '5号機'
+                        # 化成肥料10kg（K0630390）を5号機に明示固定
+                        if code == 'K0630390':
+                            return '5号機'
+
                         # 🌟 製造実績レポートに実績があればそちらを優先
                         if code in jisseki_line_dict:
                             return jisseki_line_dict[code]
@@ -503,9 +513,23 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             else:
                                 return 'その他'
 
-                        # kg品（化成肥料・真砂土以外）はその他
+                        # kg品の振り分け（比重1.0換算）
                         if vol < 0:
-                            return 'その他'
+                            kg_w = get_kg_weight(name)
+                            if kg_w < 1.0:
+                                return '4号機'
+                            else:
+                                eff_vol = int(kg_w)
+                                if eff_vol < 10:
+                                    return '5号機'
+                                elif eff_vol >= 25:
+                                    return '1号機'
+                                elif eff_vol <= 20:
+                                    recipe_bags = recipe_total_bags.get(r.get('中身設計コード', ''), 0)
+                                    return '6号機' if recipe_bags >= 300 else '2号機'
+                                else:
+                                    return '2号機'
+
                         # 10L未満は5号機
                         if vol < 10:
                             return '5号機'

@@ -129,23 +129,38 @@ def clean_bom_master(df_raw_bom):
 
 def extract_volume_safe(name_str):
     n_str = str(name_str)
+    # 例外：真砂土15kgは便宜上12L換算
     if '真砂土' in n_str and '15' in n_str:
         return 12
+    # kg品（化成肥料など）は負数で返して区別する（-1 → 1kg, -10 → 10kg）
     kg_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:[kKｋＫ][gGｇＧ])', n_str)
     if kg_match:
-        try: return -int(float(kg_match.group(1)))
+        try: return -float(kg_match.group(1))  # 負数でkg品を識別（小数点保持）
         except: return 14
     l_match = re.search(r'(\d+(?:\.\d+)?)\s*[LLｌｌＬＬ]', n_str)
     if l_match:
-        try: return int(float(l_match.group(1)))
+        try: return float(l_match.group(1))  # 小数点を保持（1.2Lなど）
         except: return 14
     elif '特大袋' in n_str: return 55
+    # g単独表記（kgではない）：例 600g → -0.6（kg換算して負数で返す）
+    g_match = re.search(r'(\d+(?:\.\d+)?)\s*[gGｇＧ](?![gGｇＧ])', n_str)
+    if g_match and not re.search(r'[kKｋＫ][gGｇＧ]', n_str):
+        try: return -float(g_match.group(1)) / 1000.0
+        except: return 14
     else: return 14
 
 def is_kg_product(name_str):
-    return bool(re.search(r'\d+(?:\.\d+)?\s*[kKｋＫ][gGｇＧ]', str(name_str)))
+    """kg単位またはg単位の商品かどうか判定"""
+    n_str = str(name_str)
+    if re.search(r'\d+(?:\.\d+)?\s*[kKｋＫ][gGｇＧ]', n_str):
+        return True
+    # g単独表記（kgではない）：例 600g, 250g
+    if re.search(r'\d+(?:\.\d+)?\s*[gGｇＧ](?![gGｇＧ])', n_str) and not re.search(r'[kKｋＫ][gGｇＧ]', n_str):
+        return True
+    return False
 
 def get_kg_weight(name_str):
+    """kg商品の重量を返す（例: 1kg→1, 600g→0.6）"""
     n_str = str(name_str)
     kg_match = re.search(r'(\d+(?:\.\d+)?)\s*[kKｋＫ][gGｇＧ]', n_str)
     if kg_match:
@@ -189,14 +204,17 @@ def job_can_support(l_key, job_item, f_mode):
         name = str(job_item.get('品目名', ''))
         if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
             return False
-        # vol < 0 はkg品（化成肥料など）：応援対象外
+        # vol < 0 はkg品（化成肥料など）：4号機応援対象外
         vol = job_item['容量_L']
         if vol < 0:
             return False
         # 4号機が応援できるのは在庫がマイナスの商品のみ
         if l_key == '4号機' and job_item.get('製造理由', '') != '現在庫がマイナス':
             return False
-        return (l_key == '5号機' and vol < 10 or l_key == '2号機' and 10 <= vol <= 25 or l_key == '4号機' and vol < 10) and not job_item['堆肥・腐葉土フラグ']
+        # 再生材・もう一土元気・堆肥・腐葉土系は3号機固定品のため他ラインの応援不可
+        if job_item['堆肥・腐葉土フラグ'] or any(k in name for k in ['再生材', 'もう一土元気']):
+            return False
+        return (l_key == '5号機' and vol < 10 or l_key == '2号機' and 10 <= vol <= 25 or l_key == '4号機' and vol < 10)
 
 def get_next_w_date(cur, holidays_list):
     nd = cur
@@ -206,11 +224,33 @@ def get_next_w_date(cur, holidays_list):
 # 4号機：品目コードごとの実績平均速度（袋/時間）
 SPEED_4GO = {
     'K0270430': 214,
-    'K0425010': 78,
     'K0521190': 51,
     'K0571080': 140,
-    'K0430120': 70,   # 実績平均 69.5袋/時間
     'K0670290': 336,  # 実績平均 336袋/時間（4号機実績）
+    # --- ピートモス・くん炭・バーミキュライト・パーライト系（実績平均） ---
+    'K0101700': 187,  # ﾊﾞｰﾐｷｭﾗｲﾄ18L
+    'K0101800': 182,  # ﾋﾟｰﾄﾓｽ18L
+    'K0130200': 96,   # ﾊﾞｰﾐｷｭﾗｲﾄ10L
+    'K0130300': 100,  # ﾋﾟｰﾄﾓｽ10L
+    'K0130660': 73,   # くん炭10L
+    'K0190010': 54,   # ﾊﾟｰﾗｲﾄ30L
+    'K0190900': 30,   # もみがらくん炭50L
+    'K0400000': 197,  # PB･ﾋﾟｰﾄﾓｽ18L(ｺﾒﾘ)
+    'K0400010': 540,  # PB･ﾊﾞｰﾐｷｭﾗｲﾄ18L(ｶｲﾝｽﾞ)
+    'K0400020': 212,  # PB･ﾋﾟｰﾄﾓｽ18L(ｶｲﾝｽﾞ)
+    'K0425010': 86,   # PB･くん炭12L(ｶｲﾝｽﾞ)
+    'K0430110': 50,   # PB･ﾊﾞｰﾐｷｭﾗｲﾄ10L(ｻﾝ&ﾎｰﾌﾟ)
+    'K0430120': 70,   # PB･ﾋﾟｰﾄﾓｽ10L(ｻﾝ&ﾎｰﾌﾟ)
+    'K0430130': 55,   # PB･くん炭10L(ｻﾝ&ﾎｰﾌﾟ)
+    'K0430140': 33,   # PB･ﾊﾟｰﾗｲﾄ10L(ｻﾝ&ﾎｰﾌﾟ)
+    'K0465170': 178,  # PB･ﾋﾟｰﾄﾓｽ3L(ｺﾒﾘ)
+    'K0465900': 240,  # ﾊﾞｰﾐｷｭﾗｲﾄ3L(5入)
+    'K0466000': 175,  # ﾋﾟｰﾄﾓｽ3L(5入)
+    'K0466100': 100,  # ﾊﾟｰﾗｲﾄ3L(5入)
+    'K0480090': 51,   # PB･くん炭20L(ｻﾝ&ﾎｰﾌﾟ)
+    'K0490040': 18,   # PB･ﾋﾟｰﾄﾓｽ50L(ﾅﾌｺ)
+    'K0490050': 38,   # PB･くん炭50L(ﾅﾌｺ)
+    'K0490080': 35,   # PB･ﾊﾟｰﾗｲﾄ50L(ｻﾝ&ﾎｰﾌﾟ)
 }
 SPEED_4GO_DEFAULT = 100
 
@@ -427,10 +467,21 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 total_vol_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
                 df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_vol_recipe).fillna(1.0)
 
+                KEYWORDS_4GO_LOT = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
+                                    'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
+
                 def calc_bags(r):
-                    if 'CLEAR' in str(r['品目名']) and 'ERA' in str(r['品目名']):
+                    name_str = str(r['品目名'])
+                    # ピートモス・くん炭・バーミキュライト・パーライト：
+                    # ロット計算なし、安全在庫に戻すまでの不足数を10単位切り上げ
+                    if any(k in name_str for k in KEYWORDS_4GO_LOT):
+                        base_qty = r['採用ベース数量']
+                        return int(math.ceil(base_qty / 10.0) * 10) if base_qty > 0 else 0
+                    # CLEAR ERAシリーズ：ロット計算なし、採用ベース数量をそのまま袋数に
+                    if 'CLEAR' in name_str and 'ERA' in name_str:
                         return int(r['採用ベース数量'])
                     if r['kg品フラグ_g'] if 'kg品フラグ_g' in r else r.get('kg品フラグ', False):
+                        # kg品：決定kg数×分配比率÷1袋あたりkg重量
                         unit_kg = r['kg重量'] if r['kg重量'] > 0 else 1.0
                         return int(round((r['製造決定_m3'] * r['分配比率']) / unit_kg))
                     else:
@@ -464,10 +515,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             EXCLUDE_LINES = {'(なし)', 'nan', ''}
                             df_j = df_j[~df_j['設備名'].astype(str).isin(EXCLUDE_LINES)]
                             df_j = df_j[df_j['品目コード'].str.startswith('K')]
-                            # 「1号機：関西工場」→「1号機」に正規化（「機」を含む形で抽出）
                             df_j['ライン'] = df_j['設備名'].astype(str).str.extract(r'(\d+号機)')
                             df_j = df_j.dropna(subset=['ライン'])
-                            # 抽出結果はすでに「X号機」の形なので「機」を追加しない
                             grp = df_j.groupby(['品目コード', 'ライン'])['良品数'].sum().reset_index()
                             for code_j, grp_df in grp.groupby('品目コード'):
                                 best_line = grp_df.loc[grp_df['良品数'].idxmax(), 'ライン']
@@ -500,6 +549,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                 st.session_state['jisseki_data'] = df_j
                             except: pass
 
+                    # ピートモス・くん炭・バーミキュライト・パーライト → 4号機固定（最優先）
+                    KEYWORDS_4GO = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
+                                    'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
+
                     def assign_line_kansai(r):
                         name = r['品目名']
                         vol = r['容量_L']
@@ -507,7 +560,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         is_compost = r['堆肥・腐葉土フラグ']
                         is_special = any(k in name for k in ['再生材', 'もう一土元気'])
 
-                        FIXED_CODES_SONOTA = ('K0270450', 'K0490080', 'K0190010')
+                        # 🌟 ピートモス・くん炭・バーミキュライト・パーライトは4号機固定（最優先・上書き）
+                        if any(k in name for k in KEYWORDS_4GO):
+                            return '4号機'
+
+                        FIXED_CODES_SONOTA = ('K0270450', 'K0190010')
 
                         if code in ('K0390110', 'K0480080'):
                             return '3号機'

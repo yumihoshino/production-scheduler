@@ -23,7 +23,25 @@ factory_mode = st.sidebar.selectbox("対象の工場を選択してください"
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 📅 カレンダー・目標設定")
 target_days = st.sidebar.number_input("当月の目標稼働日数 (この日数以内に作り切る)", min_value=1, max_value=31, value=20)
-target_month = st.sidebar.selectbox("計画対象の月度を選択してください", ["6月", "7月", "8月", "9月", "10月"])
+
+# 製造計画月度の自動判定
+# ルール：今日が属する週（月〜土）に翌月1日が含まれる場合は翌月度扱い
+def _get_schedule_month(today):
+    week_monday = today - datetime.timedelta(days=today.weekday())
+    week_saturday = week_monday + datetime.timedelta(days=5)
+    if today.month == 12:
+        next_first = datetime.date(today.year + 1, 1, 1)
+    else:
+        next_first = datetime.date(today.year, today.month + 1, 1)
+    if week_monday <= next_first <= week_saturday:
+        return next_first.month
+    return today.month
+
+_current_schedule_month = _get_schedule_month(datetime.date.today())
+_month_options = ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"]
+_default_month = f"{_current_schedule_month}月"
+_default_idx = _month_options.index(_default_month) if _default_month in _month_options else 0
+target_month = st.sidebar.selectbox("計画対象の月度を選択してください", _month_options, index=_default_idx)
 
 default_start = datetime.date.today() + datetime.timedelta(days=1)
 start_date = st.sidebar.date_input("🚜 製造スケジュール開始日", default_start)
@@ -183,7 +201,6 @@ SPEED_4GO_DEFAULT = 100
 def get_sp(line, vol, f_mode, item_code=''):
     if f_mode == "関西工場" and line == '5号機' and str(item_code).startswith('K0225') and vol == 12:
         return 490
-    # 化成肥料10kg（K0630390）は5号機で490袋/時間
     if f_mode == "関西工場" and line == '5号機' and str(item_code) == 'K0630390':
         return 490
     if f_mode == "関西工場" and line == '4号機':
@@ -473,7 +490,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         is_compost = r['堆肥・腐葉土フラグ']
                         is_special = any(k in name for k in ['再生材', 'もう一土元気'])
 
-                        # 例外固定・手詰め品は実績より優先
                         FIXED_CODES_SONOTA = ('K0430120', 'K0270450', 'K0490080', 'K0190010')
 
                         if code == 'K0390110':
@@ -490,7 +506,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         # 化成肥料（コーナン）は5号機
                         if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
                             return '5号機'
-                        # 化成肥料10kg（K0630390）を5号機に明示固定
                         if code == 'K0630390':
                             return '5号機'
 
@@ -498,7 +513,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if code in jisseki_line_dict:
                             return jisseki_line_dict[code]
 
-                        # K0225系 専用培養土12Lは5号機（490袋/時間）
+                        # K0225系 専用培養土12Lは5号機
                         if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
                             return '5号機'
 

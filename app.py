@@ -307,7 +307,11 @@ def sort_jobs_by_size_proximity(df_line):
     return processed
 
 def job_can_support(l_key, job_item, f_mode):
-    if f_mode == "本社": return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
+    if f_mode == "本社":
+        # H0690020・H0690000・H0690030・H0390000は6号機限定のため他ラインの応援不可
+        if str(job_item.get('品目コード', '')) in ('H0690020', 'H0690000', 'H0690030', 'H0390000'):
+            return False
+        return (l_key == '5号機' and job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 30) and not job_item['堆肥・腐葉土フラグ']
     else:
         # K0225系専用培養土は袋形状が特殊なため5号機・4号機・その他のみ対応
         if str(job_item.get('品目コード', '')).startswith('K0225'):
@@ -685,7 +689,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: any(k in str(n) for k in ['腐葉土', '堆肥', '特大袋']))
 
                 if factory_mode == "本社":
-                    df_final['製造ライン'] = df_final.apply(lambda r: '3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ'] else ('5号機' if r['容量_L'] <= 12 else ('2号機' if r['容量_L'] <= 20 else '6号機')), axis=1)
+                    df_final['製造ライン'] = df_final.apply(lambda r: '6号機' if r['品目コード'] in ('H0690020', 'H0690000', 'H0690030', 'H0390000') else ('3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ'] else ('5号機' if r['容量_L'] <= 12 else ('2号機' if r['容量_L'] <= 20 else '6号機'))), axis=1)
                 else:
                     recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
 

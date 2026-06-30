@@ -157,10 +157,13 @@ st.sidebar.info(
 def safe_seek(f):
     if hasattr(f, 'seek'): f.seek(0)
 
-def load_excel_sheets_merged(file, keywords):
+def load_excel_sheets_merged(file, keywords, exclude_keywords=None):
     safe_seek(file)
     xl = pd.ExcelFile(file)
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
+    # 🌟 除外キーワードを含むシート名は対象から外す（例：「天川」関連シートを本社月間製造計画書から除外）
+    if exclude_keywords:
+        matched_sheets = [sheet for sheet in matched_sheets if not any(ex in sheet for ex in exclude_keywords)]
     if not matched_sheets:
         safe_seek(file)
         df_single = pd.read_excel(file, sheet_name=0, header=None)
@@ -240,9 +243,37 @@ def get_kg_weight(name_str):
         return float(g_match.group(1)) / 1000
     return 1.0
 
+def extract_core_name(name_str):
+    """
+    品目名から「コア名称」を抽出する。
+    容量表記、メーカー名の括弧書き、サイズ表記（細粒・中粒・大粒・小粒など）を除去し、
+    残った文字列を同系統商品グルーピングの判定基準として使う。
+    """
+    n_str = str(name_str)
+    # 括弧書き（全角・半角）を除去：例「（ｺﾒﾘ）」「(カインズ)」
+    n_str = re.sub(r'[（(][^）)]*[）)]', '', n_str)
+    # 容量・重量表記を除去：例「14L」「3kg」「600g」
+    n_str = re.sub(r'\d+(?:\.\d+)?\s*[LLｌｌＬＬkKｋＫgGｇＧ]+', '', n_str)
+    # サイズ表記を除去
+    for size_word in ['細粒', '中粒', '大粒', '小粒', '特大袋', '特大', 'ミニ', '大', '中', '小']:
+        n_str = n_str.replace(size_word, '')
+    # 記号・空白・PB等の接頭辞を除去
+    n_str = re.sub(r'[・･\s　/／\-]', '', n_str)
+    n_str = re.sub(r'^(PB|new|New|NEW)', '', n_str)
+    return n_str.strip()
+
+def is_similar_product(core_a, core_b):
+    """2つのコア名称が同系統商品とみなせるか判定（完全一致 or 部分一致）"""
+    if not core_a or not core_b:
+        return False
+    return core_a == core_b or core_a in core_b or core_b in core_a
+
 def sort_jobs_by_size_proximity(df_line):
     unprocessed = df_line.to_dict('records')
     if not unprocessed: return []
+    for j in unprocessed:
+        if 'コア名称' not in j:
+            j['コア名称'] = extract_core_name(j.get('品目名', ''))
     processed = []
     first_recipe = unprocessed[0]['中身設計コード']
     same_recipe_jobs = [j for j in unprocessed if j['中身設計コード'] == first_recipe]
@@ -250,13 +281,24 @@ def sort_jobs_by_size_proximity(df_line):
     processed.extend(same_recipe_jobs)
     for j in same_recipe_jobs: unprocessed.remove(j)
     while unprocessed:
-        last_vol = processed[-1]['容量_L']
-        min_diff = float('inf'); best_idx = -1
-        for idx, j in enumerate(unprocessed):
-            diff = abs(j['容量_L'] - last_vol)
-            if diff < min_diff: min_diff = diff; best_idx = idx
-            elif diff == min_diff:
-                if j['グループ緊急度'] < unprocessed[best_idx]['グループ緊急度']: best_idx = idx
+        last_job = processed[-1]
+        last_vol = last_job['容量_L']
+        last_core = last_job['コア名称']
+
+        # 🌟 まず「同系統商品（コア名称が一致/部分一致）」を優先的に探す。
+        # 見つかった場合は容量の近さに関わらず連続させる。
+        similar_candidates = [j for j in unprocessed if is_similar_product(last_core, j['コア名称'])]
+        if similar_candidates:
+            similar_candidates.sort(key=lambda x: (abs(x['容量_L'] - last_vol), x['グループ緊急度']))
+            best_idx = unprocessed.index(similar_candidates[0])
+        else:
+            min_diff = float('inf'); best_idx = -1
+            for idx, j in enumerate(unprocessed):
+                diff = abs(j['容量_L'] - last_vol)
+                if diff < min_diff: min_diff = diff; best_idx = idx
+                elif diff == min_diff:
+                    if j['グループ緊急度'] < unprocessed[best_idx]['グループ緊急度']: best_idx = idx
+
         next_recipe = unprocessed[best_idx]['中身設計コード']
         same_recipe_jobs = [j for j in unprocessed if j['中身設計コード'] == next_recipe]
         same_recipe_jobs.sort(key=lambda x: x['容量_L'], reverse=True)
@@ -490,7 +532,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫'] - df_zai_in_zai['入庫予定合計']).apply(lambda x: max(0, x))
 
                 # --- 月間計画書読み込み ---
-                df_monthly_raw = load_excel_sheets_merged(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"])
+                df_monthly_raw = load_excel_sheets_merged(
+                    file_gekkan,
+                    ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"],
+                    exclude_keywords=["天川"] if factory_mode == "本社" else None
+                )
                 item_row_idx = next((i for i in range(min(15, len(df_monthly_raw))) if any(kw in [str(v).strip() for v in df_monthly_raw.iloc[i].values] for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ', '商品CODE'])), 1)
 
                 # 🌟 月度ラベル行（item_row_idxより上の行）から「○月度」を探し、

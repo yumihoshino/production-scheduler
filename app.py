@@ -493,9 +493,44 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_monthly_raw = load_excel_sheets_merged(file_gekkan, ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"])
                 item_row_idx = next((i for i in range(min(15, len(df_monthly_raw))) if any(kw in [str(v).strip() for v in df_monthly_raw.iloc[i].values] for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ', '商品CODE'])), 1)
 
+                # 🌟 月度ラベル行（item_row_idxより上の行）から「○月度」を探し、
+                # target_monthに一致する列ブロックの範囲を特定する。
+                # これにより毎月同じ列構成（月末在庫/出荷予測/製造予定/製造実績/...）が繰り返される
+                # 大型フォーマットでも、選択した月度の正しい列を取得できる。
+                target_month_num = None
+                try:
+                    target_month_num = int(target_month.replace("月", ""))
+                except: pass
+
+                month_block_start = None  # target_monthブロックの開始列
+                month_block_end = None    # 次の月度ブロックの開始列（範囲の終端、exclusive）
+                if target_month_num is not None and item_row_idx >= 1:
+                    month_label_cols = []  # [(列番号, 月番号), ...]
+                    for r_scan in range(max(0, item_row_idx - 3), item_row_idx):
+                        for c_scan in range(df_monthly_raw.shape[1]):
+                            cell_val = df_monthly_raw.iloc[r_scan, c_scan]
+                            if cell_val is not None:
+                                m = re.match(r'^(\d{1,2})月度?$', str(cell_val).strip())
+                                if m:
+                                    month_label_cols.append((c_scan, int(m.group(1))))
+                        if month_label_cols:
+                            break  # 月度ラベルが見つかった行で確定
+                    month_label_cols.sort(key=lambda x: x[0])
+                    for idx_lbl, (col_pos, month_num) in enumerate(month_label_cols):
+                        if month_num == target_month_num:
+                            month_block_start = col_pos
+                            month_block_end = month_label_cols[idx_lbl + 1][0] if idx_lbl + 1 < len(month_label_cols) else df_monthly_raw.shape[1]
+                            break
+
+                # 「予定」「実績」列の検出はヘッダー行（item_row_idx行）のみを見る。
+                # タイトル行（例:「2026年製造計画表」など）まで含めて検索すると、
+                # タイトルの「計画」という文字列に誤反応してしまうため、ヘッダー行単独で判定する。
+                # month_block_start/endが特定できた場合は、その範囲内に限定して検索する。
                 plan_col_idx = None; actual_col_idx = None
-                for search_c in range(len(df_monthly_raw.columns)):
-                    col_text = "".join([str(df_monthly_raw.iloc[row, search_c]) for row in range(item_row_idx + 1)])
+                header_row_vals = [str(v).strip() for v in df_monthly_raw.iloc[item_row_idx].values]
+                search_range = range(month_block_start, month_block_end) if month_block_start is not None else range(len(header_row_vals))
+                for search_c in search_range:
+                    col_text = header_row_vals[search_c]
                     if ('予定' in col_text or '計画' in col_text) and plan_col_idx is None: plan_col_idx = search_c
                     elif '実績' in col_text and actual_col_idx is None: actual_col_idx = search_c
 

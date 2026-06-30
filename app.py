@@ -178,7 +178,7 @@ SPEED_4GO = {
     'K0521190': 51,
     'K0571080': 140,
 }
-SPEED_4GO_DEFAULT = 100  # 実績なし品目のデフォルト
+SPEED_4GO_DEFAULT = 100
 
 def get_sp(line, vol, f_mode, item_code=''):
     if f_mode == "関西工場" and line == '5号機' and str(item_code).startswith('K0225') and vol == 12:
@@ -208,7 +208,6 @@ if has_local_master or has_master_in_gekkan:
 else:
     st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
 
-# 実績レポートのスタンバイチェック
 has_jisseki = (file_jisseki is not None) or ('jisseki_data' in st.session_state) or os.path.exists("jisseki_local.csv")
 if has_jisseki:
     st.sidebar.success("🟢 製造実績レポート: 読込済み (スタンバイOK)")
@@ -262,17 +261,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     st.error("エラー: 構成表マスタが見つかりません。")
                     st.stop()
 
-                # =====================================================================
-                # 🌟【修正版】BOMルックアップ辞書の生成
-                # =====================================================================
                 bom_lookup_dict = {}
                 if not df_bom.empty:
-                    p_col = next((c for c in df_bom.columns if c in [
-                        '親品目コード', '商品CODE', '商品コード', '品目コード', '商品CD'
-                    ]), df_bom.columns[0])
-                    c_col = next((c for c in df_bom.columns if c in [
-                        '子品目コード', '配合CODE', '配合コード', '配合CD', '中身コード'
-                    ]), df_bom.columns[1])
+                    p_col = next((c for c in df_bom.columns if c in ['親品目コード', '商品CODE', '商品コード', '品目コード', '商品CD']), df_bom.columns[0])
+                    c_col = next((c for c in df_bom.columns if c in ['子品目コード', '配合CODE', '配合コード', '配合CD', '中身コード']), df_bom.columns[1])
                     for _, r in df_bom.iterrows():
                         pv_raw = str(r[p_col]).strip()
                         cv = str(r[c_col]).strip()
@@ -410,7 +402,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         return int(round((r['製造決定_m3'] * 1000 * 0.9 * r['分配比率']) / vol))
 
                 df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
-
                 df_final['製造理由'] = df_final.apply(lambda r: '現在庫がマイナス' if not pd.isna(r['現在の在庫']) and r['現在の在庫'] < 0 else ('安全在庫割れ' if r['安全割れ不足数'] > 0 else '計画未達'), axis=1)
                 df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1)
                 df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: any(k in str(n) for k in ['腐葉土', '堆肥', '特大袋']))
@@ -420,7 +411,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 else:
                     recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
 
-                    # 製造実績レポートから品目コード→最多使用ラインの辞書を構築（永続保存対応）
                     jisseki_line_dict = {}
 
                     def parse_jisseki(df_j):
@@ -502,12 +492,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
                             return '5号機'
 
-                        # 40L以上の堆肥・再生材は1号機
-                        if (is_compost or is_special) and vol >= 40:
-                            return '1号機'
-                        # 堆肥・腐葉土・再生材は3号機（40L未満）
+                        # 堆肥・腐葉土・再生材のライン振り分け（容量帯優先）
                         if is_compost or is_special:
-                            return '3号機'
+                            if vol >= 40:
+                                return '1号機'
+                            elif vol >= 14:
+                                return '3号機'
+                            elif vol >= 1.2:
+                                return '5号機'
+                            else:
+                                return 'その他'
+
                         # kg品（化成肥料・真砂土以外）はその他
                         if vol < 0:
                             return 'その他'

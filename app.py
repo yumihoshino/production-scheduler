@@ -200,8 +200,13 @@ def job_can_support(l_key, job_item, f_mode):
         # K0225系専用培養土は袋形状が特殊なため5号機・4号機・その他のみ対応
         if str(job_item.get('品目コード', '')).startswith('K0225'):
             return False
-        # 化成肥料（コーナン）は5号機専用：他ラインの応援不可
         name = str(job_item.get('品目名', ''))
+        # ピートモス・くん炭・バーミキュライト・パーライトは4号機固定：他ラインの応援不可
+        KEYWORDS_4GO_SUPPORT = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
+                                'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
+        if any(k in name for k in KEYWORDS_4GO_SUPPORT):
+            return False
+        # 化成肥料（コーナン）は5号機専用：他ラインの応援不可
         if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
             return False
         # vol < 0 はkg品（化成肥料など）：4号機応援対象外
@@ -580,37 +585,38 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if is_kg_product(name) and get_kg_weight(name) < 1.0:
                             return '4号機'
 
-                        # 化成肥料（コーナン）は5号機
-                        if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
-                            return '5号機'
-                        if code == 'K0630390':
-                            return '5号機'
-
-                        # 🌟 製造実績レポートに実績があればそちらを優先
-                        if code in jisseki_line_dict:
-                            return jisseki_line_dict[code]
-
-                        # K0225系 専用培養土12Lは5号機
-                        if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
-                            return '5号機'
-
-                        # 堆肥・腐葉土・再生材のライン振り分け（容量帯優先）
+                        # 堆肥・腐葉土・再生材は容量帯ルールを実績より優先（5号機優先方針）
+                        is_compost_only = any(k in name for k in ['腐葉土', '堆肥'])
                         if is_compost or is_special:
                             if vol >= 40:
                                 return '1号機'
                             elif vol >= 14:
                                 return '3号機'
+                            elif is_compost_only:
+                                # 腐葉土・堆肥系で3号機サイズ未満は原料の特殊性から4号機
+                                return '4号機'
                             elif vol >= 1.2:
                                 return '5号機'
                             else:
                                 return 'その他'
 
+                        # 🌟 製造実績レポートに実績があればそちらを優先
+                        if code in jisseki_line_dict:
+                            return jisseki_line_dict[code]
+
+                        # K0225系 専用培養土12Lは5号機（490袋/時間）
+                        if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
+                            return '5号機'
+
                         # kg品の振り分け（比重1.0換算）
+                        # vol < 0 はkg品を示す（-Nkg = N相当）
                         if vol < 0:
                             kg_w = get_kg_weight(name)
                             if kg_w < 1.0:
+                                # 1L未満相当 → 4号機（半自動）
                                 return '4号機'
                             else:
+                                # 1L以上相当 → 通常ルールで振り分け
                                 eff_vol = int(kg_w)
                                 if eff_vol < 10:
                                     return '5号機'

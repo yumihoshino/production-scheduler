@@ -379,7 +379,7 @@ def get_capable_lines(vol, name, code, is_compost, f_mode):
     else:  # 関西工場
         if any(k in name_str for k in _KEYWORDS_4GO):
             return ['4号機']
-        if code_str in ('K0390110', 'K0480080'):
+        if code_str in ('K0390110', 'K0480080', 'K0680190'):
             return ['3号機']
         if code_str in ('K0270450', 'K0190010'):
             return ['その他']
@@ -564,8 +564,21 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         pv_prefix = pv_prefix_match.group(1).upper() if pv_prefix_match else ''
                         pv_clean = f"{pv_prefix}_{pv_digits}" if pv_digits else ''
                         if pv_clean:
-                            if pv_clean not in bom_lookup_dict or cv.startswith(('BK', 'BH')):
+                            existing = bom_lookup_dict.get(pv_clean)
+                            # 優先順位1: BK・BHプレフィックスは最優先で上書き
+                            if cv.startswith(('BK', 'BH')):
                                 bom_lookup_dict[pv_clean] = cv
+                            # 優先順位2: K・H始まり末尾1は無視
+                            elif (cv.startswith('K') or cv.startswith('H')) and cv.endswith('1'):
+                                continue
+                            # 優先順位3: K・H始まり末尾0はBK/BHがない場合に選択
+                            elif (cv.startswith('K') or cv.startswith('H')) and cv.endswith('0'):
+                                if existing is None or not existing.startswith(('BK', 'BH')):
+                                    bom_lookup_dict[pv_clean] = cv
+                            # それ以外: まだ何も登録がない場合のみ
+                            else:
+                                if existing is None:
+                                    bom_lookup_dict[pv_clean] = cv
 
                 def extract_content_code(item_code):
                     item_str = str(item_code).strip()
@@ -863,7 +876,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                         FIXED_CODES_SONOTA = ('K0270450', 'K0190010')
 
-                        if code in ('K0390110', 'K0480080'):
+                        if code in ('K0390110', 'K0480080', 'K0680190'):
                             return '3号機'
                         if code in FIXED_CODES_SONOTA:
                             return 'その他'

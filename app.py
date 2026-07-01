@@ -282,28 +282,42 @@ def sort_jobs_by_size_proximity(df_line):
     return processed
 
 def job_can_support(l_key, job_item, f_mode):
+    """ライン l_key がジョブを応援製造できるか判定。
+    get_capable_linesを真の物理制約として使用し、固定コードの誤応援を防ぐ。"""
+    # 物理的に対応可能かチェック（固定コード・サイズ制約を一元管理）
+    capable = get_capable_lines(
+        job_item.get('容量_L', 0),
+        job_item.get('品目名', ''),
+        job_item.get('品目コード', ''),
+        job_item.get('堆肥・腐葉土フラグ', False),
+        f_mode
+    )
+    if l_key not in capable:
+        return False
+
+    # 追加制約（本社）
     if f_mode == "本社":
         if str(job_item.get('品目コード', '')) in ('H0690020', 'H0690000', 'H0690030', 'H0390000'):
             return False
-        return (l_key == '5号機' and 10 <= job_item['容量_L'] <= 25 or l_key == '2号機' and job_item['容量_L'] <= 26) and not job_item['堆肥・腐葉土フラグ']
+        return not job_item.get('堆肥・腐葉土フラグ', False)
+
+    # 追加制約（関西工場）
     else:
         if str(job_item.get('品目コード', '')).startswith('K0225'):
             return False
         name = str(job_item.get('品目名', ''))
-        KEYWORDS_4GO_SUPPORT = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
-                                'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
-        if any(k in name for k in KEYWORDS_4GO_SUPPORT):
+        if any(k in name for k in _KEYWORDS_4GO):
             return False
         if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
             return False
-        vol = job_item['容量_L']
+        vol = job_item.get('容量_L', 0)
         if vol < 0:
             return False
         if l_key == '4号機' and job_item.get('製造理由', '') != '現在庫がマイナス':
             return False
-        if job_item['堆肥・腐葉土フラグ'] or any(k in name for k in ['再生材', 'もう一土元気']):
+        if job_item.get('堆肥・腐葉土フラグ', False) or any(k in name for k in ['再生材', 'もう一土元気']):
             return False
-        return (l_key == '5号機' and vol < 10 or l_key == '2号機' and 10 <= vol <= 25 or l_key == '4号機' and vol < 10)
+        return True
 
 def get_next_w_date(cur, holidays_list):
     nd = cur
@@ -955,6 +969,43 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     }
                     for fix_code, fix_line in FIXED_LINE_KANSAI.items():
                         df_final.loc[df_final['品目コード'] == fix_code, '製造ライン'] = fix_line
+
+                # =====================================================================
+                # 🌟 同一配合・ライン違いの場合はライン毎に最小バッチを独立再計算
+                # =====================================================================
+                def recalc_batch_per_line(df):
+                    """同一配合でライン違いの品目群について、
+                    ライン毎に独立した最小バッチ・分配比率・袋数を再計算する"""
+                    df = df.copy()
+                    recipe_line_counts = df.groupby('中身設計コード')['製造ライン'].nunique()
+                    multi_line_recipes = recipe_line_counts[recipe_line_counts > 1].index.tolist()
+
+                    for recipe_code in multi_line_recipes:
+                        recipe_mask = df['中身設計コード'] == recipe_code
+                        for line, line_grp in df[recipe_mask].groupby('製造ライン'):
+                            name_str = str(line_grp['品目名'].iloc[0])
+                            is_kasei = '化成肥料' in name_str and 'ｺｰﾅﾝ' in name_str
+                            total_vol = line_grp['ベース必要容量_L'].sum()
+
+                            if is_kasei:
+                                new_m3 = float(math.ceil(total_vol / 1000) * 1000)
+                            else:
+                                m3 = (total_vol / 0.9) / 1000
+                                new_m3 = 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0))
+
+                            for idx in line_grp.index:
+                                row_vol = df.loc[idx, 'ベース必要容量_L']
+                                new_ratio = row_vol / total_vol if total_vol > 0 else 1.0
+                                df.loc[idx, '製造決定_m3'] = new_m3
+                                df.loc[idx, '分配比率'] = new_ratio
+                    return df
+
+                df_final = recalc_batch_per_line(df_final)
+                # バッチ再計算後に袋数を更新
+                df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
+                df_final['計画製造袋数'] = df_final.apply(
+                    lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1
+                )
 
                 df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)

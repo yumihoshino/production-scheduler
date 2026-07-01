@@ -947,6 +947,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     df_final['製造ライン'] = df_final.apply(assign_line_kansai, axis=1)
                     # 同一配合サイズ違いを可能な限り同一ラインに統一（物理的に不可能な場合は維持）
                     df_final = unify_recipe_lines(df_final, factory_mode)
+                    # 固定コードを統一処理後に強制上書き（unify_recipe_linesによる上書きを防ぐ）
+                    FIXED_LINE_KANSAI = {
+                        'K0390110': '3号機', 'K0480080': '3号機', 'K0680190': '3号機',
+                        'K0270450': 'その他', 'K0190010': 'その他',
+                        'K0430120': '4号機', 'K0630390': '5号機',
+                    }
+                    for fix_code, fix_line in FIXED_LINE_KANSAI.items():
+                        df_final.loc[df_final['品目コード'] == fix_code, '製造ライン'] = fix_line
 
                 df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                 df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)

@@ -1005,17 +1005,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and job_can_support(l, j, factory_mode) for ol in lines_list if ol != l for j in queues[ol])]
                         if not active: break
 
-                        run_today = active if factory_mode == "関西工場" else (
-                            lambda fa, oa: (
-                                fa + oa if len(fa) == 4
-                                else (([l for l in ['3号機', '5号機'] if l in fa] + oa)
-                                      if any(l in fa for l in ['3号機', '5号機']) and ('5号機' in fa or not any(l in fa for l in ['2号機', '6号機']))
-                                      else ([l for l in ['2号機', '6号機'] if l in fa] + oa))
-                            )(
-                                [l for l in ['2号機', '3号機', '5号機', '6号機'] if l in active],
-                                ['その他'] if 'その他' in active else []
-                            )
-                        )
+                        if factory_mode == "関西工場":
+                            run_today = active
+                        else:
+                            _fa = [l for l in ['2号機', '3号機', '5号機', '6号機'] if l in active]
+                            _oa = ['その他'] if 'その他' in active else []
+                            if len(_fa) == 4:
+                                run_today = _fa + _oa
+                            elif any(l in _fa for l in ['3号機', '5号機']) and ('5号機' in _fa or not any(l in _fa for l in ['2号機', '6号機'])):
+                                run_today = [l for l in ['3号機', '5号機'] if l in _fa] + _oa
+                            else:
+                                run_today = [l for l in ['2号機', '6号機'] if l in _fa] + _oa
 
                         cap_limit = (400.0 if loop_d.weekday() == 4 else 430.0) + ov_mins
                         w_kanji = ["月", "火", "水", "木", "金", "土", "日"][loop_d.weekday()]

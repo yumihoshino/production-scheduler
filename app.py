@@ -128,60 +128,72 @@ def _save_holidays(dates):
 _saved_holidays = _load_holidays()
 
 st.sidebar.markdown("### 🛑 工場休業日の登録")
-st.sidebar.caption("カレンダーから日付（または期間の開始・終了）を選んで登録してください。登録内容は次回も保持されます。")
+st.sidebar.caption("カレンダーの日付をタップするたびに 登録⇔解除 が切り替わります（赤=休業日）。土日は自動スキップのため登録不要です。")
 
-# カレンダーから単日または期間を選択して追加
-_hol_range = st.sidebar.date_input(
-    "休業日をカレンダーで選択（開始日と終了日をタップで期間指定）",
-    value=(),
-    min_value=start_date - datetime.timedelta(days=30),
-    max_value=start_date + datetime.timedelta(days=200),
-    key="holiday_picker"
-)
+import calendar as _cal_mod
 
-col_add, col_clear = st.sidebar.columns(2)
-with col_add:
-    _add_clicked = st.button("➕ この日付を登録", use_container_width=True)
-with col_clear:
-    _clear_clicked = st.button("🗑️ 全て削除", use_container_width=True)
+# 表示月のセッション管理
+if 'hol_cal_month' not in st.session_state:
+    st.session_state['hol_cal_month'] = datetime.date(start_date.year, start_date.month, 1)
 
-if _add_clicked:
-    _new_dates = []
-    if isinstance(_hol_range, (list, tuple)):
-        if len(_hol_range) == 2:
-            _d = _hol_range[0]
-            while _d <= _hol_range[1]:
-                if _d.weekday() < 5:  # 土日は既に自動スキップのため平日のみ登録
-                    _new_dates.append(_d)
-                _d += datetime.timedelta(days=1)
-        elif len(_hol_range) == 1:
-            _new_dates.append(_hol_range[0])
-    elif _hol_range:
-        _new_dates.append(_hol_range)
-    _merged = sorted(set(_saved_holidays) | set(_new_dates))
-    _save_holidays(_merged)
-    _saved_holidays = _merged
-    st.rerun()
+_nav1, _nav2, _nav3 = st.sidebar.columns([1, 2, 1])
+with _nav1:
+    if st.button("◀", key="hol_prev", use_container_width=True):
+        _cm = st.session_state['hol_cal_month']
+        st.session_state['hol_cal_month'] = (_cm - datetime.timedelta(days=1)).replace(day=1)
+        st.rerun()
+with _nav2:
+    _cm_disp = st.session_state['hol_cal_month']
+    st.markdown(f"<div style='text-align:center;font-weight:bold;padding-top:6px;'>{_cm_disp.year}年 {_cm_disp.month}月</div>", unsafe_allow_html=True)
+with _nav3:
+    if st.button("▶", key="hol_next", use_container_width=True):
+        _cm = st.session_state['hol_cal_month']
+        _nm_y = _cm.year + (1 if _cm.month == 12 else 0)
+        _nm_m = 1 if _cm.month == 12 else _cm.month + 1
+        st.session_state['hol_cal_month'] = datetime.date(_nm_y, _nm_m, 1)
+        st.rerun()
 
-if _clear_clicked:
-    _save_holidays([])
-    _saved_holidays = []
-    st.rerun()
+_cm = st.session_state['hol_cal_month']
+_weeks = _cal_mod.Calendar(firstweekday=0).monthdatescalendar(_cm.year, _cm.month)
 
-# 登録済み休業日の一覧表示＋個別削除
+# 曜日ヘッダー
+_hdr_cols = st.sidebar.columns(7)
+for _i, _wd in enumerate(["月", "火", "水", "木", "金", "土", "日"]):
+    _hdr_cols[_i].markdown(f"<div style='text-align:center;font-size:11px;color:#888;'>{_wd}</div>", unsafe_allow_html=True)
+
+# 日付グリッド（タップでトグル）
+_hol_set = set(_saved_holidays)
+for _week in _weeks:
+    _day_cols = st.sidebar.columns(7)
+    for _i, _d in enumerate(_week):
+        if _d.month != _cm.month:
+            _day_cols[_i].markdown("&nbsp;", unsafe_allow_html=True)
+            continue
+        if _d.weekday() >= 5:
+            _day_cols[_i].markdown(f"<div style='text-align:center;color:#ccc;font-size:13px;padding:6px 0;'>{_d.day}</div>", unsafe_allow_html=True)
+            continue
+        _is_hol = _d in _hol_set
+        if _day_cols[_i].button(
+            str(_d.day),
+            key=f"hol_{_d.isoformat()}",
+            use_container_width=True,
+            type="primary" if _is_hol else "secondary"
+        ):
+            if _is_hol:
+                _hol_set.discard(_d)
+            else:
+                _hol_set.add(_d)
+            _save_holidays(sorted(_hol_set))
+            st.rerun()
+
+# 登録済み一覧と一括削除
 if _saved_holidays:
     _w_kanji_list = ["月", "火", "水", "木", "金", "土", "日"]
-    _del_target = st.sidebar.selectbox(
-        f"📋 登録済み休業日（{len(_saved_holidays)}日）— 選んで下のボタンで個別削除",
-        options=["（削除する日を選択）"] + [d.strftime("%Y/%m/%d") + f"（{_w_kanji_list[d.weekday()]}）" for d in sorted(_saved_holidays)],
-        index=0
-    )
-    if st.sidebar.button("❌ 選択した休業日を削除"):
-        if _del_target != "（削除する日を選択）":
-            _del_date = datetime.datetime.strptime(_del_target.split("（")[0], "%Y/%m/%d").date()
-            _remain = [d for d in _saved_holidays if d != _del_date]
-            _save_holidays(_remain)
-            st.rerun()
+    _list_str = "、".join(f"{d.month}/{d.day}({_w_kanji_list[d.weekday()]})" for d in sorted(_saved_holidays))
+    st.sidebar.caption(f"📋 登録済み {len(_saved_holidays)}日: {_list_str}")
+    if st.sidebar.button("🗑️ 全て削除", key="hol_clear"):
+        _save_holidays([])
+        st.rerun()
 
 holidays_input = list(_saved_holidays)
 

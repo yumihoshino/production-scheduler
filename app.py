@@ -44,26 +44,38 @@ default_start = datetime.date.today() + datetime.timedelta(days=1)
 start_date = st.sidebar.date_input("🚜 製造スケジュール開始日", default_start)
 
 HOLIDAYS_FILE = "holidays_local.csv"
-JISSEKI_FILE  = "jisseki_local.csv"
+# 実績レポートは工場別に独立して保存・維持する
+JISSEKI_FILES = {"本社": "jisseki_honsha_local.csv", "関西工場": "jisseki_kansai_local.csv"}
+_LEGACY_JISSEKI_FILE = "jisseki_local.csv"  # 旧形式（工場共通）互換用
 
-def _load_jisseki():
-    """起動時にCSVから実績データを復元してセッションに保持する"""
-    if 'jisseki_data' in st.session_state:
-        return st.session_state['jisseki_data']
-    if os.path.exists(JISSEKI_FILE):
-        for enc in ('utf-8', 'cp932'):
-            try:
-                df_j = pd.read_csv(JISSEKI_FILE, encoding=enc)
-                st.session_state['jisseki_data'] = df_j
-                return df_j
-            except: pass
+def _jisseki_key(f_mode):
+    return f"jisseki_data_{f_mode}"
+
+def _load_jisseki(f_mode):
+    """起動時にCSVから該当工場の実績データを復元してセッションに保持する"""
+    key = _jisseki_key(f_mode)
+    if key in st.session_state:
+        return st.session_state[key]
+    jf = JISSEKI_FILES.get(f_mode, _LEGACY_JISSEKI_FILE)
+    paths = [jf]
+    # 旧形式ファイルしかない場合の互換読み込み
+    if not os.path.exists(jf) and os.path.exists(_LEGACY_JISSEKI_FILE):
+        paths.append(_LEGACY_JISSEKI_FILE)
+    for p in paths:
+        if os.path.exists(p):
+            for enc in ('utf-8', 'cp932'):
+                try:
+                    df_j = pd.read_csv(p, encoding=enc)
+                    st.session_state[key] = df_j
+                    return df_j
+                except: pass
     return None
 
-def _save_jisseki(df_j):
-    """実績データをセッションとCSVの両方に保存する"""
-    st.session_state['jisseki_data'] = df_j
+def _save_jisseki(df_j, f_mode):
+    """該当工場の実績データをセッションとCSVの両方に保存する（他工場には影響しない）"""
+    st.session_state[_jisseki_key(f_mode)] = df_j
     try:
-        df_j.to_csv(JISSEKI_FILE, index=False, encoding='utf-8')
+        df_j.to_csv(JISSEKI_FILES.get(f_mode, _LEGACY_JISSEKI_FILE), index=False, encoding='utf-8')
     except: pass
 
 def parse_jisseki(df_j):
@@ -91,8 +103,8 @@ def parse_jisseki(df_j):
             result[code_j] = best_line
     return result
 
-# 起動時に実績データをCSVから復元
-_load_jisseki()
+# 起動時に選択中工場の実績データをCSVから復元
+_load_jisseki(factory_mode)
 
 def _load_holidays():
     if 'holidays_data' in st.session_state:
@@ -556,15 +568,16 @@ if has_local_master or has_master_in_gekkan:
 else:
     st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
 
-# 新規ファイルがアップロードされた場合は即時保存（ボタン押下前でも維持）
+# 新規ファイルがアップロードされた場合は選択中工場のデータとして即時保存
+# （工場別に独立保存されるため、他工場の実績データは消えない）
 if file_jisseki is not None:
     try:
         safe_seek(file_jisseki)
         _df_j_new = pd.read_excel(file_jisseki, header=3)
-        _save_jisseki(_df_j_new)
+        _save_jisseki(_df_j_new, factory_mode)
     except: pass
 
-has_jisseki = ('jisseki_data' in st.session_state) or os.path.exists(JISSEKI_FILE)
+has_jisseki = (_jisseki_key(factory_mode) in st.session_state) or os.path.exists(JISSEKI_FILES.get(factory_mode, _LEGACY_JISSEKI_FILE))
 if has_jisseki:
     st.sidebar.success("🟢 製造実績レポート: 読込済み (スタンバイOK)")
 else:
@@ -884,7 +897,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     jisseki_line_dict = {}
 
                     # グローバルのparse_jisseki・_load_jissekiを使用（起動時に既に復元済み）
-                    _df_j_cached = _load_jisseki()
+                    _df_j_cached = _load_jisseki(factory_mode)
                     if _df_j_cached is not None:
                         try:
                             jisseki_line_dict = parse_jisseki(_df_j_cached)

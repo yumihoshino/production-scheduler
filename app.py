@@ -1089,7 +1089,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             else:
                                 run_today = [l for l in ['2号機', '6号機'] if l in _fa] + _oa
 
-                        cap_limit = (400.0 if loop_d.weekday() == 4 else 430.0) + ov_mins
+                        # 稼働時間：月〜木430分/金400分 を基本とし、月によって調整
+                        # 7月・8月・12月: 1時間短縮、3月・4月: 1時間延長（カレンダー月基準）
+                        _base_cap = 400.0 if loop_d.weekday() == 4 else 430.0
+                        _month_adj = -60.0 if loop_d.month in (7, 8, 12) else (60.0 if loop_d.month in (3, 4) else 0.0)
+                        cap_limit = _base_cap + _month_adj + ov_mins
                         w_kanji = ["月", "火", "水", "木", "金", "土", "日"][loop_d.weekday()]
                         d_str_disp = loop_d.strftime("%Y/%m/%d")
 

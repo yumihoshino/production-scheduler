@@ -126,17 +126,64 @@ def _save_holidays(dates):
     except: pass
 
 _saved_holidays = _load_holidays()
-_holiday_options = [start_date + datetime.timedelta(days=x) for x in range(60)]
-_default_holidays = [d for d in _saved_holidays if d in _holiday_options]
 
-holidays_input = st.sidebar.multiselect(
-    "🛑 平日の祝祭日・工場休業日を指定してください（自動スキップされます・登録内容は次回も保持されます）",
-    options=_holiday_options,
-    default=_default_holidays,
-    format_func=lambda x: x.strftime("%Y/%m/%d (%a)")
+st.sidebar.markdown("### 🛑 工場休業日の登録")
+st.sidebar.caption("カレンダーから日付（または期間の開始・終了）を選んで登録してください。登録内容は次回も保持されます。")
+
+# カレンダーから単日または期間を選択して追加
+_hol_range = st.sidebar.date_input(
+    "休業日をカレンダーで選択（開始日と終了日をタップで期間指定）",
+    value=(),
+    min_value=start_date - datetime.timedelta(days=30),
+    max_value=start_date + datetime.timedelta(days=200),
+    key="holiday_picker"
 )
-if set(holidays_input) != set(_saved_holidays):
-    _save_holidays(holidays_input)
+
+col_add, col_clear = st.sidebar.columns(2)
+with col_add:
+    _add_clicked = st.button("➕ この日付を登録", use_container_width=True)
+with col_clear:
+    _clear_clicked = st.button("🗑️ 全て削除", use_container_width=True)
+
+if _add_clicked:
+    _new_dates = []
+    if isinstance(_hol_range, (list, tuple)):
+        if len(_hol_range) == 2:
+            _d = _hol_range[0]
+            while _d <= _hol_range[1]:
+                if _d.weekday() < 5:  # 土日は既に自動スキップのため平日のみ登録
+                    _new_dates.append(_d)
+                _d += datetime.timedelta(days=1)
+        elif len(_hol_range) == 1:
+            _new_dates.append(_hol_range[0])
+    elif _hol_range:
+        _new_dates.append(_hol_range)
+    _merged = sorted(set(_saved_holidays) | set(_new_dates))
+    _save_holidays(_merged)
+    _saved_holidays = _merged
+    st.rerun()
+
+if _clear_clicked:
+    _save_holidays([])
+    _saved_holidays = []
+    st.rerun()
+
+# 登録済み休業日の一覧表示＋個別削除
+if _saved_holidays:
+    _w_kanji_list = ["月", "火", "水", "木", "金", "土", "日"]
+    _del_target = st.sidebar.selectbox(
+        f"📋 登録済み休業日（{len(_saved_holidays)}日）— 選んで下のボタンで個別削除",
+        options=["（削除する日を選択）"] + [d.strftime("%Y/%m/%d") + f"（{_w_kanji_list[d.weekday()]}）" for d in sorted(_saved_holidays)],
+        index=0
+    )
+    if st.sidebar.button("❌ 選択した休業日を削除"):
+        if _del_target != "（削除する日を選択）":
+            _del_date = datetime.datetime.strptime(_del_target.split("（")[0], "%Y/%m/%d").date()
+            _remain = [d for d in _saved_holidays if d != _del_date]
+            _save_holidays(_remain)
+            st.rerun()
+
+holidays_input = list(_saved_holidays)
 
 def _get_month_end(month_label, base_today):
     m = int(month_label.replace("月", ""))
@@ -200,7 +247,7 @@ file_jisseki = st.sidebar.file_uploader("④ [任意] 製造実績レポート (
 st.sidebar.markdown("---")
 consider_iko = st.sidebar.checkbox(
     "📦 確定済みの入庫予定（入）を差し引いて不足数を計算する",
-    value=False,
+    value=True,
     help="ONにすると、在庫推移リストの「入」行に記載済みの入庫予定数量を、製造計画期間の安全割れ不足数からあらかじめ差し引きます。さらに、その確定済み入庫予定はシート2・3にも「製造指示済」として反映され、その時間分を差し引いた残り時間で新規の製造計画が組まれます。OFFの場合は今日時点の在庫のみで判定します。"
 )
 

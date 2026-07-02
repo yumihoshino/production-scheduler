@@ -148,7 +148,21 @@ def _get_month_end(month_label, base_today):
     else:
         return datetime.date(y, m + 1, 1) - datetime.timedelta(days=1)
 
-_month_end = _get_month_end(target_month, datetime.date.today())
+plan_to_yearend = st.sidebar.checkbox(
+    "📆 期末（10月末）まで一括計画する",
+    value=False,
+    help="ONにすると、選択月度から10月度（期末）までの全月の計画残数を合算して、10月末までのスケジュールを一括生成します。"
+)
+
+def _get_yearend_date(base_today):
+    """当期の期末（10月31日）を返す。11月・12月なら翌年の10月末。"""
+    y = base_today.year if base_today.month <= 10 else base_today.year + 1
+    return datetime.date(y, 10, 31)
+
+if plan_to_yearend:
+    _month_end = _get_yearend_date(datetime.date.today())
+else:
+    _month_end = _get_month_end(target_month, datetime.date.today())
 
 def _count_business_days(s_date, e_date, holiday_list):
     if e_date < s_date:
@@ -163,10 +177,11 @@ def _count_business_days(s_date, e_date, holiday_list):
 
 _auto_target_days = _count_business_days(start_date, _month_end, holidays_input)
 
+_max_days = 260 if plan_to_yearend else 31
 target_days = st.sidebar.number_input(
-    "当月の目標稼働日数 (この日数以内に作り切る)",
-    min_value=1, max_value=31,
-    value=min(_auto_target_days, 31)
+    "目標稼働日数 (この日数以内に作り切る)" if plan_to_yearend else "当月の目標稼働日数 (この日数以内に作り切る)",
+    min_value=1, max_value=_max_days,
+    value=min(_auto_target_days, _max_days)
 )
 st.sidebar.caption(f"📌 {start_date.strftime('%Y/%m/%d')}〜{_month_end.strftime('%Y/%m/%d')}の営業日数を自動計算：{_auto_target_days}日")
 
@@ -743,10 +758,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     target_month_num = int(target_month.replace("月", ""))
                 except: pass
 
-                month_block_start = None
-                month_block_end = None
-                if target_month_num is not None and item_row_idx >= 1:
-                    month_label_cols = []
+                # 月ラベル列の位置を全てスキャン
+                month_label_cols = []
+                if item_row_idx >= 1:
                     for r_scan in range(max(0, item_row_idx - 3), item_row_idx):
                         for c_scan in range(df_monthly_raw.shape[1]):
                             cell_val = df_monthly_raw.iloc[r_scan, c_scan]
@@ -757,35 +771,79 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if month_label_cols:
                             break
                     month_label_cols.sort(key=lambda x: x[0])
-                    for idx_lbl, (col_pos, month_num) in enumerate(month_label_cols):
-                        if month_num == target_month_num:
-                            month_block_start = col_pos
-                            month_block_end = month_label_cols[idx_lbl + 1][0] if idx_lbl + 1 < len(month_label_cols) else df_monthly_raw.shape[1]
-                            break
 
-                plan_col_idx = None; actual_col_idx = None
+                def _find_month_block(month_num):
+                    """指定月の(ブロック開始列, 終了列)を返す"""
+                    for idx_lbl, (col_pos, m_num) in enumerate(month_label_cols):
+                        if m_num == month_num:
+                            b_end = month_label_cols[idx_lbl + 1][0] if idx_lbl + 1 < len(month_label_cols) else df_monthly_raw.shape[1]
+                            return col_pos, b_end
+                    return None, None
+
                 header_row_vals = [str(v).strip() for v in df_monthly_raw.iloc[item_row_idx].values]
-                search_range = range(month_block_start, month_block_end) if month_block_start is not None else range(len(header_row_vals))
-                for search_c in search_range:
-                    col_text = header_row_vals[search_c]
-                    if ('予定' in col_text or '計画' in col_text) and plan_col_idx is None: plan_col_idx = search_c
-                    elif '実績' in col_text and actual_col_idx is None: actual_col_idx = search_c
 
-                if plan_col_idx is None or actual_col_idx is None:
-                    try: plan_col_idx = 46 + (int(target_month.replace("月", "")) - 6) * 2; actual_col_idx = plan_col_idx + 1
-                    except: plan_col_idx, actual_col_idx = 46, 47
+                def _find_plan_actual_cols(b_start, b_end):
+                    """ブロック内の予定・実績列インデックスを返す"""
+                    p_idx = None; a_idx = None
+                    rng = range(b_start, b_end) if b_start is not None else range(len(header_row_vals))
+                    for search_c in rng:
+                        col_text = header_row_vals[search_c]
+                        if ('予定' in col_text or '計画' in col_text) and p_idx is None: p_idx = search_c
+                        elif '実績' in col_text and a_idx is None: a_idx = search_c
+                    return p_idx, a_idx
+
+                # 対象月リストを決定（期末一括なら対象月〜10月度、通常は対象月のみ）
+                if plan_to_yearend and target_month_num is not None:
+                    if target_month_num <= 10:
+                        months_to_plan = list(range(target_month_num, 11))
+                    else:
+                        # 11月・12月始まりは翌期の10月度まで
+                        months_to_plan = list(range(target_month_num, 13)) + list(range(1, 11))
+                else:
+                    months_to_plan = [target_month_num] if target_month_num is not None else []
+
+                # 各月の予定・実績列を収集
+                month_col_pairs = []
+                for m_num in months_to_plan:
+                    b_start, b_end = _find_month_block(m_num)
+                    p_idx, a_idx = _find_plan_actual_cols(b_start, b_end)
+                    if p_idx is not None and a_idx is not None:
+                        month_col_pairs.append((m_num, p_idx, a_idx))
+
+                # フォールバック（1つも見つからない場合）
+                if not month_col_pairs:
+                    try:
+                        p_fb = 46 + (int(target_month.replace("月", "")) - 6) * 2
+                        month_col_pairs = [(target_month_num, p_fb, p_fb + 1)]
+                    except:
+                        month_col_pairs = [(target_month_num, 46, 47)]
 
                 code_col_idx = next((c for c in range(min(5, len(df_monthly_raw.columns))) if any(kw in str(df_monthly_raw.iloc[item_row_idx, c]) for kw in ['商品CD', '品目コード', 'コード', '商品', '商品CODE'])), 0)
                 name_col_idx = next((c for c in range(min(5, len(df_monthly_raw.columns))) if any(kw in str(df_monthly_raw.iloc[item_row_idx, c]) for kw in ['商品名', '品目名', '名', '品名'])), 1)
 
                 df_m = df_monthly_raw.iloc[item_row_idx+1:].copy()
+                # 月ごとの計画残数（予定−実績、マイナスは0）を合算する
+                _total_zan = None
+                _total_plan = None
+                _total_actual = None
+                for (m_num, p_idx, a_idx) in month_col_pairs:
+                    _p = pd.to_numeric(df_m.iloc[:, p_idx], errors='coerce').fillna(0)
+                    _a = pd.to_numeric(df_m.iloc[:, a_idx], errors='coerce').fillna(0)
+                    _z = (_p - _a).clip(lower=0)
+                    _total_zan    = _z if _total_zan is None else _total_zan + _z
+                    _total_plan   = _p if _total_plan is None else _total_plan + _p
+                    _total_actual = _a if _total_actual is None else _total_actual + _a
+
                 df_m_clean = pd.DataFrame({
                     '品目コード': df_m.iloc[:, code_col_idx].astype(str).str.strip(),
                     '品目名_計画書': df_m.iloc[:, name_col_idx].astype(str).str.strip(),
-                    '選択月_製造予定': pd.to_numeric(df_m.iloc[:, plan_col_idx], errors='coerce').fillna(0),
-                    '選択月_製造実績': pd.to_numeric(df_m.iloc[:, actual_col_idx], errors='coerce').fillna(0)
+                    '選択月_製造予定': _total_plan.values,
+                    '選択月_製造実績': _total_actual.values
                 })
-                df_m_clean['選択月_計画残数'] = (df_m_clean['選択月_製造予定'] - df_m_clean['選択月_製造実績']).apply(lambda x: max(0, x))
+                df_m_clean['選択月_計画残数'] = _total_zan.values
+                if plan_to_yearend and len(month_col_pairs) > 1:
+                    _m_names = "、".join(f"{m}月度" for m, _, _ in month_col_pairs)
+                    st.info(f"📆 期末一括計画モード: {_m_names} の計画残数を合算して計画します。")
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (~df_m_clean['品目コード'].isin(['nan', '', 'None']))].drop_duplicates(subset=['品目コード'])
 
                 del df_monthly_raw, df_m, df_m_clean
@@ -1186,7 +1244,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     if not sup_found: break
                         loop_d = get_next_w_date(loop_d + datetime.timedelta(days=1), holidays_input)
                         day_cnt += 1
-                        if day_cnt > 45: break
+                        if day_cnt > (150 if plan_to_yearend else 45): break
                     return sched, day_cnt - 1
 
                 ov_res = 0
@@ -1296,5 +1354,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         sheet.freeze_panes = "D2"
 
                 out_io = io.BytesIO(); wb.save(out_io); out_io.seek(0)
-                st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{target_month}度_スケジュール表.xlsx")
+                _fname_period = f"{target_month}度〜10月度(期末)" if plan_to_yearend else f"{target_month}度"
+                st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{_fname_period}_スケジュール表.xlsx")
             except Exception as e: st.error(f"計算実行エラー: {e}")

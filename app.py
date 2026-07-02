@@ -44,6 +44,55 @@ default_start = datetime.date.today() + datetime.timedelta(days=1)
 start_date = st.sidebar.date_input("🚜 製造スケジュール開始日", default_start)
 
 HOLIDAYS_FILE = "holidays_local.csv"
+JISSEKI_FILE  = "jisseki_local.csv"
+
+def _load_jisseki():
+    """起動時にCSVから実績データを復元してセッションに保持する"""
+    if 'jisseki_data' in st.session_state:
+        return st.session_state['jisseki_data']
+    if os.path.exists(JISSEKI_FILE):
+        for enc in ('utf-8', 'cp932'):
+            try:
+                df_j = pd.read_csv(JISSEKI_FILE, encoding=enc)
+                st.session_state['jisseki_data'] = df_j
+                return df_j
+            except: pass
+    return None
+
+def _save_jisseki(df_j):
+    """実績データをセッションとCSVの両方に保存する"""
+    st.session_state['jisseki_data'] = df_j
+    try:
+        df_j.to_csv(JISSEKI_FILE, index=False, encoding='utf-8')
+    except: pass
+
+def parse_jisseki(df_j):
+    """実績レポートDFから品目コード→最多実績ラインの辞書を返す"""
+    df_j = df_j.copy()
+    df_j.columns = [str(c).strip() for c in df_j.columns]
+    line_col = next((c for c in df_j.columns if '設備名' in c), None)
+    code_col = next((c for c in df_j.columns if '品目コード' in c), None)
+    qty_col  = next((c for c in df_j.columns if '製造良品数' in c
+                     and '予算' not in c and '到達' not in c and '差異' not in c), None)
+    result = {}
+    if line_col and code_col and qty_col:
+        df_j = df_j[[line_col, code_col, qty_col]].copy()
+        df_j.columns = ['設備名', '品目コード', '良品数']
+        df_j['品目コード'] = df_j['品目コード'].astype(str).str.strip()
+        df_j['良品数']     = pd.to_numeric(df_j['良品数'], errors='coerce').fillna(0)
+        df_j['設備名']     = df_j['設備名'].ffill()
+        df_j = df_j[~df_j['設備名'].astype(str).isin({'(なし)', 'nan', ''})]
+        df_j = df_j[df_j['品目コード'].str.startswith('K')]
+        df_j['ライン'] = df_j['設備名'].astype(str).str.extract(r'(\d+号機)')
+        df_j = df_j.dropna(subset=['ライン'])
+        grp = df_j.groupby(['品目コード', 'ライン'])['良品数'].sum().reset_index()
+        for code_j, grp_df in grp.groupby('品目コード'):
+            best_line = grp_df.loc[grp_df['良品数'].idxmax(), 'ライン']
+            result[code_j] = best_line
+    return result
+
+# 起動時に実績データをCSVから復元
+_load_jisseki()
 
 def _load_holidays():
     if 'holidays_data' in st.session_state:
@@ -507,7 +556,15 @@ if has_local_master or has_master_in_gekkan:
 else:
     st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
 
-has_jisseki = (file_jisseki is not None) or ('jisseki_data' in st.session_state) or os.path.exists("jisseki_local.csv")
+# 新規ファイルがアップロードされた場合は即時保存（ボタン押下前でも維持）
+if file_jisseki is not None:
+    try:
+        safe_seek(file_jisseki)
+        _df_j_new = pd.read_excel(file_jisseki, header=3)
+        _save_jisseki(_df_j_new)
+    except: pass
+
+has_jisseki = ('jisseki_data' in st.session_state) or os.path.exists(JISSEKI_FILE)
 if has_jisseki:
     st.sidebar.success("🟢 製造実績レポート: 読込済み (スタンバイOK)")
 else:
@@ -826,54 +883,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                     jisseki_line_dict = {}
 
-                    def parse_jisseki(df_j):
-                        df_j.columns = [str(c).strip() for c in df_j.columns]
-                        line_col = next((c for c in df_j.columns if '設備名' in c), None)
-                        code_col = next((c for c in df_j.columns if '品目コード' in c), None)
-                        qty_col  = next((c for c in df_j.columns if '製造良品数' in c and '予算' not in c and '到達' not in c and '差異' not in c), None)
-                        result = {}
-                        if line_col and code_col and qty_col:
-                            df_j = df_j[[line_col, code_col, qty_col]].copy()
-                            df_j.columns = ['設備名', '品目コード', '良品数']
-                            df_j['品目コード'] = df_j['品目コード'].astype(str).str.strip()
-                            df_j['良品数'] = pd.to_numeric(df_j['良品数'], errors='coerce').fillna(0)
-                            df_j['設備名'] = df_j['設備名'].ffill()
-                            EXCLUDE_LINES = {'(なし)', 'nan', ''}
-                            df_j = df_j[~df_j['設備名'].astype(str).isin(EXCLUDE_LINES)]
-                            df_j = df_j[df_j['品目コード'].str.startswith('K')]
-                            df_j['ライン'] = df_j['設備名'].astype(str).str.extract(r'(\d+号機)')
-                            df_j = df_j.dropna(subset=['ライン'])
-                            grp = df_j.groupby(['品目コード', 'ライン'])['良品数'].sum().reset_index()
-                            for code_j, grp_df in grp.groupby('品目コード'):
-                                best_line = grp_df.loc[grp_df['良品数'].idxmax(), 'ライン']
-                                result[code_j] = best_line
-                        return result
-
-                    if file_jisseki is not None:
+                    # グローバルのparse_jisseki・_load_jissekiを使用（起動時に既に復元済み）
+                    _df_j_cached = _load_jisseki()
+                    if _df_j_cached is not None:
                         try:
-                            safe_seek(file_jisseki)
-                            df_j = pd.read_excel(file_jisseki, header=3)
-                            jisseki_line_dict = parse_jisseki(df_j)
-                            st.session_state['jisseki_data'] = df_j
-                            df_j.to_csv("jisseki_local.csv", index=False, encoding='utf-8')
-                            st.sidebar.success(f"🟢 実績レポート新規登録 ({len(jisseki_line_dict)}品目)")
+                            jisseki_line_dict = parse_jisseki(_df_j_cached)
+                            st.sidebar.success(f"🟢 実績レポート適用済み ({len(jisseki_line_dict)}品目)")
                         except Exception as e:
                             st.sidebar.warning(f"⚠️ 実績レポート読込エラー: {e}")
-                    elif 'jisseki_data' in st.session_state:
-                        try:
-                            jisseki_line_dict = parse_jisseki(st.session_state['jisseki_data'])
-                        except: pass
-                    elif os.path.exists("jisseki_local.csv"):
-                        try:
-                            df_j = pd.read_csv("jisseki_local.csv", encoding='utf-8')
-                            jisseki_line_dict = parse_jisseki(df_j)
-                            st.session_state['jisseki_data'] = df_j
-                        except:
-                            try:
-                                df_j = pd.read_csv("jisseki_local.csv", encoding='cp932')
-                                jisseki_line_dict = parse_jisseki(df_j)
-                                st.session_state['jisseki_data'] = df_j
-                            except: pass
 
                     KEYWORDS_4GO = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
                                     'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']

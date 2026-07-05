@@ -294,7 +294,9 @@ def load_excel_sheets_merged(file, keywords, exclude_keywords=None):
     matched_sheets = [sheet for sheet in xl.sheet_names if any(kw in sheet for kw in keywords)]
     if exclude_keywords:
         matched_sheets = [sheet for sheet in matched_sheets if not any(ex in sheet for ex in exclude_keywords)]
+    load_excel_sheets_merged.last_matched = list(matched_sheets)
     if not matched_sheets:
+        load_excel_sheets_merged.last_matched = [f"{xl.sheet_names[0]}（キーワード不一致のため先頭シートを使用）"]
         safe_seek(file)
         df_single = pd.read_excel(file, sheet_name=0, header=None)
         return df_single
@@ -805,11 +807,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫'] - df_zai_in_zai['入庫予定合計']).apply(lambda x: max(0, x))
 
                 # --- 月間計画書読み込み ---
+                _gekkan_keywords = ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"]
                 df_monthly_raw = load_excel_sheets_merged(
                     file_gekkan,
-                    ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"],
+                    _gekkan_keywords,
                     exclude_keywords=["天川"] if factory_mode == "本社" else None
                 )
+                # 読み込んだシートを画面に表示（複数シートが正しく読まれているかの確認用）
+                _sheets_read = getattr(load_excel_sheets_merged, 'last_matched', [])
+                st.info(f"📄 月間製造計画書の読込シート（{len(_sheets_read)}枚）: {'、'.join(_sheets_read) if _sheets_read else '不明'}")
+                if factory_mode == "関西工場" and len(_sheets_read) < 2:
+                    st.warning("⚠️ 関西工場の月間製造計画書は2シートの読み込みが想定されています。1シートのみの場合は、シート名に「関西」「計画」等のキーワードが含まれているかご確認ください。")
                 item_row_idx = next((i for i in range(min(15, len(df_monthly_raw))) if any(kw in [str(v).strip() for v in df_monthly_raw.iloc[i].values] for kw in ['商品CD', '商品コード', '品目コード', '品目ｺｰﾄﾞ', '品目ｃｄ', '商品CODE'])), 1)
 
                 target_month_num = None
@@ -884,6 +892,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 else:
                     months_to_plan = [target_month_num] if target_month_num is not None else []
 
+                _first_month = months_to_plan[0] if months_to_plan else target_month_num
+                _month_order = {m: i for i, m in enumerate(months_to_plan)}
+
                 # 各月の予定・実績列を収集
                 month_col_pairs = []
                 for m_num in months_to_plan:
@@ -904,14 +915,16 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 name_col_idx = next((c for c in range(min(5, len(df_monthly_raw.columns))) if any(kw in str(df_monthly_raw.iloc[item_row_idx, c]) for kw in ['商品名', '品目名', '名', '品名'])), 1)
 
                 df_m = df_monthly_raw.iloc[item_row_idx+1:].copy()
-                # 月ごとの計画残数（予定−実績、マイナスは0）を合算する
+                # 月ごとの計画残数（予定−実績、マイナスは0）を月別に保持しつつ合計も計算する
                 _total_zan = None
                 _total_plan = None
                 _total_actual = None
+                _month_zan = {}
                 for (m_num, p_idx, a_idx) in month_col_pairs:
                     _p = pd.to_numeric(df_m.iloc[:, p_idx], errors='coerce').fillna(0)
                     _a = pd.to_numeric(df_m.iloc[:, a_idx], errors='coerce').fillna(0)
                     _z = (_p - _a).clip(lower=0)
+                    _month_zan[m_num] = _z
                     _total_zan    = _z if _total_zan is None else _total_zan + _z
                     _total_plan   = _p if _total_plan is None else _total_plan + _p
                     _total_actual = _a if _total_actual is None else _total_actual + _a
@@ -923,11 +936,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     '選択月_製造実績': _total_actual.values
                 })
                 df_m_clean['選択月_計画残数'] = _total_zan.values
+                for _mz_num, _mz_series in _month_zan.items():
+                    df_m_clean[f'残数_{_mz_num}'] = _mz_series.values
                 if plan_to_yearend:
                     _found_months = [m for m, _, _ in month_col_pairs]
                     _missing_months = [m for m in months_to_plan if m not in _found_months]
                     _m_names = "、".join(f"{m}月度" for m in _found_months)
-                    st.info(f"📆 期末一括計画モード: {_m_names} の計画残数を合算して計画します。")
+                    st.info(f"📆 期末一括計画モード: {_m_names} を各月度ごとに区切って計画します（各月の計画はその月内でスケジュールされます）。")
                     if _missing_months:
                         _miss_names = "、".join(f"{m}月度" for m in _missing_months)
                         # 診断用: スキャンした行の内容サンプルを収集
@@ -947,413 +962,526 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 del df_monthly_raw, df_m, df_m_clean
                 gc.collect()
 
-                all_codes = set(df_zai_in_zai['品目コード']).union(set(df_m_distinct[df_m_distinct['選択月_計画残数'] > 0]['品目コード']))
-                master_list = []
-                for code in all_codes:
-                    EXCLUDE_CODES = {
-                        '合計', 'nan', '商品CD', '品目コード', 'None', '商品CODE',
-                        '進捗状況', '製造進捗状況', '小計', '総合計', '合　計',
-                        '品目ｺｰﾄﾞ', '品目cd', '品目ｃｄ', ''
-                    }
-                    if code in EXCLUDE_CODES or not re.search(r'\d', str(code)) or (factory_mode == "関西工場" and str(code).startswith('H')): continue
-                    zai_row = df_zai_in_zai[df_zai_in_zai['品目コード'] == code]
-                    plan_row = df_m_distinct[df_m_distinct['品目コード'] == code]
-                    master_list.append({
-                        '品目コード': code,
-                        '品目名': zai_row['品目名'].iloc[0] if not zai_row.empty else (plan_row['品目名_計画書'].iloc[0] if not plan_row.empty else "不明"),
-                        '現在の在庫': zai_row['現在の在庫'].iloc[0] if not zai_row.empty else np.nan,
-                        '安全在庫数': zai_row['安全在庫数'].iloc[0] if not zai_row.empty else np.nan,
-                        '安全割れ不足数': zai_row['安全割れ不足数'].iloc[0] if not zai_row.empty else 0.0,
-                        '今月の計画残数': plan_row['選択月_計画残数'].iloc[0] if not plan_row.empty else 0.0
-                    })
-
-                df_master_combined = pd.DataFrame(master_list)
-                if df_master_combined.empty: st.warning("計画対象となる品目がありません。"); st.stop()
-
-                df_master_combined['採用ベース数量'] = df_master_combined[['安全割れ不足数', '今月の計画残数']].max(axis=1)
-                df_master_combined = df_master_combined[df_master_combined['採用ベース数量'] > 0].copy()
-
-                df_master_combined['容量_L'] = df_master_combined['品目名'].apply(extract_volume_safe)
-                df_master_combined['kg品フラグ'] = df_master_combined['品目名'].apply(is_kg_product)
-                df_master_combined['kg重量'] = df_master_combined['品目名'].apply(get_kg_weight)
-                df_master_combined['ベース必要容量_L'] = df_master_combined.apply(
-                    lambda r: r['採用ベース数量'] * r['kg重量'] if r['kg品フラグ'] else r['採用ベース数量'] * max(r['容量_L'], 1),
-                    axis=1
-                )
-                df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
-
-                def calc_batch(group_df):
-                    name = group_df['品目名'].iloc[0]
-                    is_kasei = '化成肥料' in name and 'ｺｰﾅﾝ' in name
-                    total = group_df['ベース必要容量_L'].sum()
-                    if is_kasei:
-                        batches = math.ceil(total / 1000)
-                        return float(batches * 1000)
-                    else:
-                        m3 = (total / 0.9) / 1000
-                        return 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0))
-
-                grouped = df_master_combined.groupby('中身設計コード').apply(
-                    lambda g: pd.Series({'ベース必要容量_L': g['ベース必要容量_L'].sum(),
-                                         '製造決定_m3': calc_batch(g),
-                                         'kg品フラグ': g['kg品フラグ'].any()})
-                ).reset_index()
-
-                df_final = df_master_combined.merge(grouped[['中身設計コード', '製造決定_m3', 'kg品フラグ']], on='中身設計コード', how='left', suffixes=('', '_g'))
-                df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0)
-
-                total_vol_recipe = df_final.groupby('中身設計コード')['ベース必要容量_L'].transform('sum')
-                df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_vol_recipe).fillna(1.0)
-
-                KEYWORDS_4GO_LOT = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
-                                    'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
-
-                def calc_bags(r):
-                    name_str = str(r['品目名'])
-                    if any(k in name_str for k in KEYWORDS_4GO_LOT):
-                        base_qty = r['採用ベース数量']
-                        return int(math.ceil(base_qty / 10.0) * 10) if base_qty > 0 else 0
-                    if 'CLEAR' in name_str and 'ERA' in name_str:
-                        return int(r['採用ベース数量'])
-                    if r['kg品フラグ_g'] if 'kg品フラグ_g' in r else r.get('kg品フラグ', False):
-                        unit_kg = r['kg重量'] if r['kg重量'] > 0 else 1.0
-                        return int(round((r['製造決定_m3'] * r['分配比率']) / unit_kg))
-                    else:
-                        vol = max(r['容量_L'], 1)
-                        return int(round((r['製造決定_m3'] * 1000 * 0.9 * r['分配比率']) / vol))
-
-                df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
-                df_final['製造理由'] = df_final.apply(lambda r: '現在庫がマイナス' if not pd.isna(r['現在の在庫']) and r['現在の在庫'] < 0 else ('安全在庫割れ' if r['安全割れ不足数'] > 0 else '計画未達'), axis=1)
-                df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1)
-                df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: any(k in str(n) for k in ['腐葉土', '堆肥', '特大袋']))
-
                 # =====================================================================
-                # 🌟 ライン割り当て
+                # 🌟 1期間（1か月度）分の計画を独立して立案する関数
+                #    use_inventory: 在庫・安全在庫の考慮（初月のみTrue）
+                #    use_confirmed: 確定入庫予定の反映（初月のみTrue）
                 # =====================================================================
-                if factory_mode == "本社":
-                    # 本社ライン割り当てルール：
-                    #   固定コード            → 6号機
-                    #   堆肥・腐葉土・再生材系 → 3号機
-                    #   9L以下               → その他（外注）
-                    #   10L〜25L             → 5号機（速度優先）
-                    #   26L                  → 2号機（速度優先）
-                    #   27L以上              → 6号機
-                    df_final['製造ライン'] = df_final.apply(lambda r:
-                        '6号機' if r['品目コード'] in ('H0690020', 'H0690000', 'H0690030', 'H0390000')
-                        else ('3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ']
-                        else ('その他' if r['容量_L'] < 10
-                        else ('5号機' if r['容量_L'] <= 25
-                        else ('2号機' if r['容量_L'] <= 26
-                        else '6号機')))), axis=1)
-                    # 同一配合サイズ違いを可能な限り同一ラインに統一
-                    df_final = unify_recipe_lines(df_final, factory_mode)
-                else:
-                    recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
+                def _plan_period(df_m_period, use_inventory, use_confirmed, period_start, target_bd, day_offset, month_label):
+                    all_codes = (set(df_zai_in_zai['品目コード']) if use_inventory else set()).union(set(df_m_period[df_m_period['選択月_計画残数'] > 0]['品目コード']))
+                    master_list = []
+                    for code in all_codes:
+                        EXCLUDE_CODES = {
+                            '合計', 'nan', '商品CD', '品目コード', 'None', '商品CODE',
+                            '進捗状況', '製造進捗状況', '小計', '総合計', '合　計',
+                            '品目ｺｰﾄﾞ', '品目cd', '品目ｃｄ', ''
+                        }
+                        if code in EXCLUDE_CODES or not re.search(r'\d', str(code)) or (factory_mode == "関西工場" and str(code).startswith('H')): continue
+                        zai_row = df_zai_in_zai[df_zai_in_zai['品目コード'] == code] if use_inventory else df_zai_in_zai.iloc[0:0]
+                        plan_row = df_m_period[df_m_period['品目コード'] == code]
+                        _common = {
+                            '品目コード': code,
+                            '品目名': zai_row['品目名'].iloc[0] if not zai_row.empty else (plan_row['品目名_計画書'].iloc[0] if not plan_row.empty else "不明"),
+                            '現在の在庫': zai_row['現在の在庫'].iloc[0] if not zai_row.empty else np.nan,
+                            '安全在庫数': zai_row['安全在庫数'].iloc[0] if not zai_row.empty else np.nan,
+                        }
+                        _anzen = zai_row['安全割れ不足数'].iloc[0] if not zai_row.empty else 0.0
 
-                    jisseki_line_dict = {}
+                        def _zan_of(m_q):
+                            _cn = f'残数_{m_q}'
+                            if not plan_row.empty and _cn in plan_row.columns:
+                                return float(plan_row[_cn].iloc[0])
+                            if m_q == _first_month and not plan_row.empty:
+                                return float(plan_row['選択月_計画残数'].iloc[0])
+                            return 0.0
 
-                    # グローバルのparse_jisseki・_load_jissekiを使用（起動時に既に復元済み）
-                    _df_j_cached = _load_jisseki(factory_mode)
-                    if _df_j_cached is not None:
-                        try:
-                            jisseki_line_dict = parse_jisseki(_df_j_cached)
-                            st.sidebar.success(f"🟢 実績レポート適用済み ({len(jisseki_line_dict)}品目)")
-                        except Exception as e:
-                            st.sidebar.warning(f"⚠️ 実績レポート読込エラー: {e}")
+                        # 月度ごとに独立した計画行を作成（先頭月は安全在庫要素も含む）
+                        for m_num in months_to_plan:
+                            zan_m = _zan_of(m_num)
+                            if m_num == _first_month:
+                                master_list.append({**_common, '安全割れ不足数': _anzen, '今月の計画残数': zan_m, '対象月度': m_num})
+                            elif zan_m > 0:
+                                master_list.append({**_common, '安全割れ不足数': 0.0, '今月の計画残数': zan_m, '対象月度': m_num})
 
-                    KEYWORDS_4GO = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
-                                    'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
+                    df_master_combined = pd.DataFrame(master_list)
+                    if df_master_combined.empty: return [], pd.DataFrame(), 0, 0
 
-                    def assign_line_kansai(r):
-                        name = r['品目名']
-                        vol = r['容量_L']
-                        code = r['品目コード']
-                        is_compost = r['堆肥・腐葉土フラグ']
-                        is_special = any(k in name for k in ['再生材', 'もう一土元気'])
+                    df_master_combined['採用ベース数量'] = df_master_combined[['安全割れ不足数', '今月の計画残数']].max(axis=1)
+                    df_master_combined = df_master_combined[df_master_combined['採用ベース数量'] > 0].copy()
 
-                        if any(k in name for k in KEYWORDS_4GO):
-                            return '4号機'
+                    df_master_combined['容量_L'] = df_master_combined['品目名'].apply(extract_volume_safe)
+                    df_master_combined['kg品フラグ'] = df_master_combined['品目名'].apply(is_kg_product)
+                    df_master_combined['kg重量'] = df_master_combined['品目名'].apply(get_kg_weight)
+                    df_master_combined['ベース必要容量_L'] = df_master_combined.apply(
+                        lambda r: r['採用ベース数量'] * r['kg重量'] if r['kg品フラグ'] else r['採用ベース数量'] * max(r['容量_L'], 1),
+                        axis=1
+                    )
+                    df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
 
-                        FIXED_CODES_SONOTA = ('K0270450', 'K0190010')
+                    def calc_batch(group_df):
+                        name = group_df['品目名'].iloc[0]
+                        is_kasei = '化成肥料' in name and 'ｺｰﾅﾝ' in name
+                        total = group_df['ベース必要容量_L'].sum()
+                        if is_kasei:
+                            batches = math.ceil(total / 1000)
+                            return float(batches * 1000)
+                        else:
+                            m3 = (total / 0.9) / 1000
+                            return 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0))
 
-                        if code in ('K0390110', 'K0480080', 'K0680190'):
-                            return '3号機'
-                        if code in FIXED_CODES_SONOTA:
-                            return 'その他'
-                        if code == 'K0430120':
-                            return '4号機'
-                        if 'CLEAR' in name and 'ERA' in name:
-                            return 'その他'
-                        if '有機石灰' in name:
-                            return 'その他'
-                        if is_kg_product(name) and get_kg_weight(name) < 1.0:
-                            return '4号機'
+                    grouped = df_master_combined.groupby(['中身設計コード', '対象月度']).apply(
+                        lambda g: pd.Series({'ベース必要容量_L': g['ベース必要容量_L'].sum(),
+                                             '製造決定_m3': calc_batch(g),
+                                             'kg品フラグ': g['kg品フラグ'].any()})
+                    ).reset_index()
 
-                        is_compost_only = any(k in name for k in ['腐葉土', '堆肥'])
-                        if is_compost or is_special:
-                            if '特大袋' in name:
-                                return '3号機'
-                            elif vol >= 40:
-                                return '1号機'
-                            elif vol >= 14:
-                                return '3号機'
-                            elif is_compost_only:
+                    df_final = df_master_combined.merge(grouped[['中身設計コード', '対象月度', '製造決定_m3', 'kg品フラグ']], on=['中身設計コード', '対象月度'], how='left', suffixes=('', '_g'))
+                    df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0)
+
+                    total_vol_recipe = df_final.groupby(['中身設計コード', '対象月度'])['ベース必要容量_L'].transform('sum')
+                    df_final['分配比率'] = (df_final['ベース必要容量_L'] / total_vol_recipe).fillna(1.0)
+
+                    KEYWORDS_4GO_LOT = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
+                                        'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
+
+                    def calc_bags(r):
+                        name_str = str(r['品目名'])
+                        if any(k in name_str for k in KEYWORDS_4GO_LOT):
+                            base_qty = r['採用ベース数量']
+                            return int(math.ceil(base_qty / 10.0) * 10) if base_qty > 0 else 0
+                        if 'CLEAR' in name_str and 'ERA' in name_str:
+                            return int(r['採用ベース数量'])
+                        if r['kg品フラグ_g'] if 'kg品フラグ_g' in r else r.get('kg品フラグ', False):
+                            unit_kg = r['kg重量'] if r['kg重量'] > 0 else 1.0
+                            return int(round((r['製造決定_m3'] * r['分配比率']) / unit_kg))
+                        else:
+                            vol = max(r['容量_L'], 1)
+                            return int(round((r['製造決定_m3'] * 1000 * 0.9 * r['分配比率']) / vol))
+
+                    df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
+                    df_final['製造理由'] = df_final.apply(lambda r: ('計画未達' if r.get('対象月度', _first_month) != _first_month else ('現在庫がマイナス' if not pd.isna(r['現在の在庫']) and r['現在の在庫'] < 0 else ('安全在庫割れ' if r['安全割れ不足数'] > 0 else '計画未達'))), axis=1)
+                    df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1)
+                    df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: any(k in str(n) for k in ['腐葉土', '堆肥', '特大袋']))
+
+                    # =====================================================================
+                    # 🌟 ライン割り当て
+                    # =====================================================================
+                    if factory_mode == "本社":
+                        # 本社ライン割り当てルール：
+                        #   固定コード            → 6号機
+                        #   堆肥・腐葉土・再生材系 → 3号機
+                        #   9L以下               → その他（外注）
+                        #   10L〜25L             → 5号機（速度優先）
+                        #   26L                  → 2号機（速度優先）
+                        #   27L以上              → 6号機
+                        df_final['製造ライン'] = df_final.apply(lambda r:
+                            '6号機' if r['品目コード'] in ('H0690020', 'H0690000', 'H0690030', 'H0390000')
+                            else ('3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ']
+                            else ('その他' if r['容量_L'] < 10
+                            else ('5号機' if r['容量_L'] <= 25
+                            else ('2号機' if r['容量_L'] <= 26
+                            else '6号機')))), axis=1)
+                        # 同一配合サイズ違いを可能な限り同一ラインに統一
+                        df_final = unify_recipe_lines(df_final, factory_mode)
+                    else:
+                        recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
+
+                        jisseki_line_dict = {}
+
+                        # グローバルのparse_jisseki・_load_jissekiを使用（起動時に既に復元済み）
+                        _df_j_cached = _load_jisseki(factory_mode)
+                        if _df_j_cached is not None:
+                            try:
+                                jisseki_line_dict = parse_jisseki(_df_j_cached)
+                                st.sidebar.success(f"🟢 実績レポート適用済み ({len(jisseki_line_dict)}品目)")
+                            except Exception as e:
+                                st.sidebar.warning(f"⚠️ 実績レポート読込エラー: {e}")
+
+                        KEYWORDS_4GO = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
+                                        'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
+
+                        def assign_line_kansai(r):
+                            name = r['品目名']
+                            vol = r['容量_L']
+                            code = r['品目コード']
+                            is_compost = r['堆肥・腐葉土フラグ']
+                            is_special = any(k in name for k in ['再生材', 'もう一土元気'])
+
+                            if any(k in name for k in KEYWORDS_4GO):
                                 return '4号機'
-                            elif vol >= 1.2:
-                                return '5号機'
-                            else:
+
+                            FIXED_CODES_SONOTA = ('K0270450', 'K0190010')
+
+                            if code in ('K0390110', 'K0480080', 'K0680190'):
+                                return '3号機'
+                            if code in FIXED_CODES_SONOTA:
                                 return 'その他'
-
-                        if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
-                            return '5号機'
-                        if code == 'K0630390':
-                            return '5号機'
-
-                        if code in jisseki_line_dict:
-                            return jisseki_line_dict[code]
-
-                        if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
-                            return '5号機'
-
-                        # kg品（vol < 0）の容量換算による割り当て
-                        # 関西工場：10〜20L → 6号機、21〜25L → 2号機、26L以上 → 1号機（速度優先）
-                        if vol < 0:
-                            kg_w = get_kg_weight(name)
-                            if kg_w < 1.0:
+                            if code == 'K0430120':
                                 return '4号機'
-                            else:
-                                eff_vol = int(kg_w)
-                                if eff_vol < 10:
-                                    return '5号機'
-                                elif eff_vol >= 26:
+                            if 'CLEAR' in name and 'ERA' in name:
+                                return 'その他'
+                            if '有機石灰' in name:
+                                return 'その他'
+                            if is_kg_product(name) and get_kg_weight(name) < 1.0:
+                                return '4号機'
+
+                            is_compost_only = any(k in name for k in ['腐葉土', '堆肥'])
+                            if is_compost or is_special:
+                                if '特大袋' in name:
+                                    return '3号機'
+                                elif vol >= 40:
                                     return '1号機'
-                                elif eff_vol <= 20:
-                                    return '6号機'  # 10〜20L：6号機が速い(597 > 494)
+                                elif vol >= 14:
+                                    return '3号機'
+                                elif is_compost_only:
+                                    return '4号機'
+                                elif vol >= 1.2:
+                                    return '5号機'
                                 else:
-                                    return '2号機'  # 21〜25L：2号機
+                                    return 'その他'
 
-                        # 通常品の容量による割り当て
-                        # 関西工場：9L以下 → 5号機、10〜20L → 6号機、21〜25L → 2号機、26L以上 → 1号機（速度優先）
-                        if vol < 1.2:
-                            return '4号機'
-                        if vol < 10:
-                            return '5号機'
-                        if vol >= 26:
-                            return '1号機'
-                        if vol <= 20:
-                            return '6号機'  # 10〜20L：6号機が速い(597 > 494)
-                        return '2号機'      # 21〜25L：2号機
+                            if '化成肥料' in name and 'ｺｰﾅﾝ' in name:
+                                return '5号機'
+                            if code == 'K0630390':
+                                return '5号機'
 
-                    df_final['製造ライン'] = df_final.apply(assign_line_kansai, axis=1)
-                    # 同一配合サイズ違いを可能な限り同一ラインに統一（物理的に不可能な場合は維持）
-                    df_final = unify_recipe_lines(df_final, factory_mode)
-                    # 固定コードを統一処理後に強制上書き（unify_recipe_linesによる上書きを防ぐ）
-                    FIXED_LINE_KANSAI = {
-                        'K0390110': '3号機', 'K0480080': '3号機', 'K0680190': '3号機',
-                        'K0270450': 'その他', 'K0190010': 'その他',
-                        'K0430120': '4号機', 'K0630390': '5号機',
-                    }
-                    for fix_code, fix_line in FIXED_LINE_KANSAI.items():
-                        df_final.loc[df_final['品目コード'] == fix_code, '製造ライン'] = fix_line
+                            if code in jisseki_line_dict:
+                                return jisseki_line_dict[code]
 
-                # =====================================================================
-                # 🌟 同一配合・ライン違いの場合はライン毎に最小バッチを独立再計算
-                # =====================================================================
-                def recalc_batch_per_line(df):
-                    """同一配合でライン違いの品目群について、
-                    ライン毎に独立した最小バッチ・分配比率・袋数を再計算する"""
-                    df = df.copy()
-                    recipe_line_counts = df.groupby('中身設計コード')['製造ライン'].nunique()
-                    multi_line_recipes = recipe_line_counts[recipe_line_counts > 1].index.tolist()
+                            if str(code).startswith('K0225') and '専用培養土' in name and '12' in name:
+                                return '5号機'
 
-                    for recipe_code in multi_line_recipes:
-                        recipe_mask = df['中身設計コード'] == recipe_code
-                        for line, line_grp in df[recipe_mask].groupby('製造ライン'):
-                            name_str = str(line_grp['品目名'].iloc[0])
-                            is_kasei = '化成肥料' in name_str and 'ｺｰﾅﾝ' in name_str
-                            total_vol = line_grp['ベース必要容量_L'].sum()
-
-                            if is_kasei:
-                                new_m3 = float(math.ceil(total_vol / 1000) * 1000)
-                            else:
-                                m3 = (total_vol / 0.9) / 1000
-                                new_m3 = 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0))
-
-                            for idx in line_grp.index:
-                                row_vol = df.loc[idx, 'ベース必要容量_L']
-                                new_ratio = row_vol / total_vol if total_vol > 0 else 1.0
-                                df.loc[idx, '製造決定_m3'] = new_m3
-                                df.loc[idx, '分配比率'] = new_ratio
-                    return df
-
-                df_final = recalc_batch_per_line(df_final)
-                # バッチ再計算後に袋数を更新
-                df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
-                df_final['計画製造袋数'] = df_final.apply(
-                    lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1
-                )
-
-                df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
-                df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
-                df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
-
-                df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, False]).copy()
-
-                # 🌟 確定済み入庫予定のライン・品目情報付与
-                confirmed_jobs = []
-                if consider_iko and iko_entries:
-                    line_info_dict = df_final.set_index('品目コード')[['製造ライン', '品目名', '容量_L', '中身設計コード']].to_dict('index')
-                    for entry in iko_entries:
-                        i_code = entry['品目コード']
-                        i_qty = entry['数量']
-                        i_date = entry['日付']
-                        if i_qty <= 0:
-                            continue
-                        if i_code in line_info_dict:
-                            info = line_info_dict[i_code]
-                            i_line = info['製造ライン']
-                            i_name = info['品目名']
-                            i_vol = info['容量_L']
-                            i_recipe = info['中身設計コード']
-                        else:
-                            zai_row_lookup = df_zai_in_zai[df_zai_in_zai['品目コード'] == i_code]
-                            i_name = zai_row_lookup['品目名'].iloc[0] if not zai_row_lookup.empty else i_code
-                            i_vol = extract_volume_safe(i_name)
-                            i_recipe = extract_content_code(i_code)
-                            if factory_mode == "本社":
-                                # 本社ライン割り当てルールと同一ロジック
-                                if i_code in ('H0690020', 'H0690000', 'H0690030', 'H0390000'):
-                                    i_line = '6号機'
-                                elif i_code == 'H0620030' or any(k in i_name for k in ['再生材', 'もう一土元気']) or any(k in i_name for k in ['腐葉土', '堆肥', '特大袋']):
-                                    i_line = '3号機'
-                                elif i_vol < 10:
-                                    i_line = 'その他'
-                                elif i_vol <= 25:
-                                    i_line = '5号機'
-                                elif i_vol <= 26:
-                                    i_line = '2号機'
+                            # kg品（vol < 0）の容量換算による割り当て
+                            # 関西工場：10〜20L → 6号機、21〜25L → 2号機、26L以上 → 1号機（速度優先）
+                            if vol < 0:
+                                kg_w = get_kg_weight(name)
+                                if kg_w < 1.0:
+                                    return '4号機'
                                 else:
-                                    i_line = '6号機'
-                            else:
-                                i_line = 'その他'
-                        confirmed_jobs.append({
-                            '日付': i_date, 'ライン': i_line, '配合コード': i_recipe,
-                            '品目コード': i_code, '品目名': i_name, '数量': i_qty, '容量_L': i_vol
-                        })
-
-                del df_master_combined, df_final, grouped
-                gc.collect()
-
-                # =====================================================================
-                # 🌟 lines_list（本社：その他を追加）
-                # =====================================================================
-                lines_list = ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機", "その他"]
-                queues_base = {line: sort_jobs_by_size_proximity(df_final_sorted[df_final_sorted['製造ライン'] == line]) for line in lines_list}
-
-                def run_sim(ov_mins):
-                    queues = copy.deepcopy(queues_base)
-                    cur_idx = {l: 0 for l in queues}
-                    for l in queues:
-                        for j in queues[l]: j['rem'] = j['計画製造袋数']
-
-                    loop_d = get_next_w_date(start_date, holidays_input)
-                    day_cnt = 1; sched = []
-
-                    while True:
-                        active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and job_can_support(l, j, factory_mode) for ol in lines_list if ol != l for j in queues[ol])]
-                        if not active: break
-
-                        if factory_mode == "関西工場":
-                            run_today = active
-                        else:
-                            _fa = [l for l in ['2号機', '3号機', '5号機', '6号機'] if l in active]
-                            _oa = ['その他'] if 'その他' in active else []
-                            if len(_fa) == 4:
-                                run_today = _fa + _oa
-                            elif any(l in _fa for l in ['3号機', '5号機']) and ('5号機' in _fa or not any(l in _fa for l in ['2号機', '6号機'])):
-                                run_today = [l for l in ['3号機', '5号機'] if l in _fa] + _oa
-                            else:
-                                run_today = [l for l in ['2号機', '6号機'] if l in _fa] + _oa
-
-                        # 稼働時間：月〜木430分/金400分 を基本とし、月によって調整
-                        # 7月・8月・12月: 1時間短縮、3月・4月: 1時間延長（カレンダー月基準）
-                        _base_cap = 400.0 if loop_d.weekday() == 4 else 430.0
-                        _month_adj = -60.0 if loop_d.month in (7, 8, 12) else (60.0 if loop_d.month in (3, 4) else 0.0)
-                        cap_limit = _base_cap + _month_adj + ov_mins
-                        w_kanji = ["月", "火", "水", "木", "金", "土", "日"][loop_d.weekday()]
-                        d_str_disp = loop_d.strftime("%Y/%m/%d")
-
-                        for line in run_today:
-                            spent = 0.0; p_rec = None; p_vol = None
-
-                            day_confirmed = [cj for cj in confirmed_jobs if cj['日付'] == loop_d and cj['ライン'] == line]
-                            for cj in day_confirmed:
-                                sp_min_c = get_sp(line, cj['容量_L'], factory_mode, cj['品目コード']) / 60
-                                dur_c = cj['数量'] / sp_min_c if sp_min_c > 0 else 0.0
-                                sw_c = 5.0 if spent > 0 and p_rec == cj['配合コード'] and p_vol and p_vol > cj['容量_L'] else (10.0 if spent > 0 else 0.0)
-                                sched.append({'稼働日': f"{day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': cj['配合コード'], '品目コード': cj['品目コード'], '品目名': cj['品目名'], '指示数量(袋)': int(cj['数量']), '製造時間(分)': round(dur_c, 1), '切り替え(分)': round(sw_c, 1), '合計拘束時間(分)': round(sw_c + dur_c, 1), '備考': '製造指示済', '製造理由': '製造指示済', 't_start': spent + sw_c, 't_end': spent + sw_c + dur_c})
-                                spent += sw_c + dur_c
-                                p_rec = cj['配合コード']; p_vol = cj['容量_L']
-
-                            while spent < cap_limit:
-                                idx = cur_idx[line]
-                                if idx < len(queues[line]):
-                                    job = queues[line][idx]
-                                    sw = 5.0 if spent > 0 and p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
-                                    avail = cap_limit - spent - sw
-                                    if avail <= 5.0: break
-
-                                    sp_min = get_sp(line, job['容量_L'], factory_mode, job['品目コード']) / 60
-                                    max_b = avail * sp_min
-
-                                    if job['rem'] <= max_b:
-                                        b_make = job['rem']; dur = b_make / sp_min
-                                        sched.append({'稼働日': f"{day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': '全量完了', '製造理由': job['製造理由'], 't_start': spent + sw, 't_end': spent + sw + dur})
-                                        spent += sw + dur; job['rem'] = 0; cur_idx[line] += 1
-                                        p_rec = job['中身設計コード']; p_vol = job['容量_L']
+                                    eff_vol = int(kg_w)
+                                    if eff_vol < 10:
+                                        return '5号機'
+                                    elif eff_vol >= 26:
+                                        return '1号機'
+                                    elif eff_vol <= 20:
+                                        return '6号機'  # 10〜20L：6号機が速い(597 > 494)
                                     else:
-                                        b_make = math.floor(max_b)
-                                        if b_make <= 0: break
-                                        dur = b_make / sp_min
-                                        sched.append({'稼働日': f"{day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': '翌日へ継続', '製造理由': job['製造理由'], 't_start': spent + sw, 't_end': spent + sw + dur})
-                                        spent += sw + dur; job['rem'] -= b_make
-                                        p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
+                                        return '2号機'  # 21〜25L：2号機
+
+                            # 通常品の容量による割り当て
+                            # 関西工場：9L以下 → 5号機、10〜20L → 6号機、21〜25L → 2号機、26L以上 → 1号機（速度優先）
+                            if vol < 1.2:
+                                return '4号機'
+                            if vol < 10:
+                                return '5号機'
+                            if vol >= 26:
+                                return '1号機'
+                            if vol <= 20:
+                                return '6号機'  # 10〜20L：6号機が速い(597 > 494)
+                            return '2号機'      # 21〜25L：2号機
+
+                        df_final['製造ライン'] = df_final.apply(assign_line_kansai, axis=1)
+                        # 同一配合サイズ違いを可能な限り同一ラインに統一（物理的に不可能な場合は維持）
+                        df_final = unify_recipe_lines(df_final, factory_mode)
+                        # 固定コードを統一処理後に強制上書き（unify_recipe_linesによる上書きを防ぐ）
+                        FIXED_LINE_KANSAI = {
+                            'K0390110': '3号機', 'K0480080': '3号機', 'K0680190': '3号機',
+                            'K0270450': 'その他', 'K0190010': 'その他',
+                            'K0430120': '4号機', 'K0630390': '5号機',
+                        }
+                        for fix_code, fix_line in FIXED_LINE_KANSAI.items():
+                            df_final.loc[df_final['品目コード'] == fix_code, '製造ライン'] = fix_line
+
+                    # =====================================================================
+                    # 🌟 同一配合・ライン違いの場合はライン毎に最小バッチを独立再計算
+                    # =====================================================================
+                    def recalc_batch_per_line(df):
+                        """同一配合でライン違いの品目群について、
+                        ライン毎に独立した最小バッチ・分配比率・袋数を再計算する"""
+                        df = df.copy()
+                        recipe_line_counts = df.groupby(['中身設計コード', '対象月度'])['製造ライン'].nunique()
+                        multi_line_recipes = recipe_line_counts[recipe_line_counts > 1].index.tolist()
+
+                        for recipe_code in multi_line_recipes:
+                            recipe_mask = (df['中身設計コード'] == recipe_code[0]) & (df['対象月度'] == recipe_code[1])
+                            for line, line_grp in df[recipe_mask].groupby('製造ライン'):
+                                name_str = str(line_grp['品目名'].iloc[0])
+                                is_kasei = '化成肥料' in name_str and 'ｺｰﾅﾝ' in name_str
+                                total_vol = line_grp['ベース必要容量_L'].sum()
+
+                                if is_kasei:
+                                    new_m3 = float(math.ceil(total_vol / 1000) * 1000)
                                 else:
-                                    sup_found = False
-                                    for o_line in lines_list:
-                                        if o_line == line: continue
-                                        for job in queues[o_line]:
-                                            if job['rem'] > 0 and job_can_support(line, job, factory_mode):
-                                                sw = 10.0; avail = cap_limit - spent - sw
-                                                if avail <= 5.0: break
-                                                sp_min = (646 if line == '5号機' else 500) / 60 if factory_mode == "関西工場" else ((730 if job['容量_L'] in [12, 14] else 650) if line == '5号機' else 400) / 60
-                                                max_b = avail * sp_min
-                                                if job['rem'] <= max_b:
-                                                    b_make = job['rem']; dur = b_make / sp_min
-                                                    sched.append({'稼働日': f"{day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': f"★{o_line}応援(全量)", '製造理由': job['製造理由'], 't_start': spent + sw, 't_end': spent + sw + dur})
-                                                    spent += sw + dur; job['rem'] = 0; sup_found = True; p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
-                                                else:
-                                                    b_make = math.floor(max_b)
-                                                    if b_make <= 0: break
-                                                    dur = b_make / sp_min
-                                                    sched.append({'稼働日': f"{day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': f"★{o_line}応援(継続)", '製造理由': job['製造理由'], 't_start': spent + sw, 't_end': spent + sw + dur})
-                                                    spent += sw + dur; job['rem'] -= b_make; sup_found = True; p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
-                                        if sup_found: break
-                                    if not sup_found: break
-                        loop_d = get_next_w_date(loop_d + datetime.timedelta(days=1), holidays_input)
-                        day_cnt += 1
-                        if day_cnt > (150 if plan_to_yearend else 45): break
-                    return sched, day_cnt - 1
+                                    m3 = (total_vol / 0.9) / 1000
+                                    new_m3 = 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0))
 
-                ov_res = 0
-                full_sched, gen_days = run_sim(0)
-                if gen_days > target_days:
-                    for t_ov in [30, 60, 90, 120, 150, 180, 210]:
-                        ts, td = run_sim(t_ov)
-                        if td <= target_days: ov_res = t_ov; full_sched = ts; gen_days = td; break
+                                for idx in line_grp.index:
+                                    row_vol = df.loc[idx, 'ベース必要容量_L']
+                                    new_ratio = row_vol / total_vol if total_vol > 0 else 1.0
+                                    df.loc[idx, '製造決定_m3'] = new_m3
+                                    df.loc[idx, '分配比率'] = new_ratio
+                        return df
 
-                if ov_res > 0: st.warning(f"📢 目標の{target_days}日以内に終わらせるため、毎日一律【{ov_res}分】の残業が必要です。")
-                else: st.success(f"🟢 【残業不要】通常の定時稼働のまま【{gen_days}日間】ですべて作り切れます！")
+                    df_final = recalc_batch_per_line(df_final)
+                    # バッチ再計算後に袋数を更新
+                    df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
+                    df_final['計画製造袋数'] = df_final.apply(
+                        lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1
+                    )
+
+                    df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
+                    df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
+                    df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
+
+                    df_final['_月順'] = df_final['対象月度'].map(lambda m: _month_order.get(m, 99))
+                    df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', '_月順', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, True, False]).copy()
+
+                    # 🌟 確定済み入庫予定のライン・品目情報付与
+                    confirmed_jobs = []
+                    if use_confirmed and consider_iko and iko_entries:
+                        line_info_dict = df_final.drop_duplicates(subset=['品目コード']).set_index('品目コード')[['製造ライン', '品目名', '容量_L', '中身設計コード']].to_dict('index')
+                        for entry in iko_entries:
+                            i_code = entry['品目コード']
+                            i_qty = entry['数量']
+                            i_date = entry['日付']
+                            if i_qty <= 0:
+                                continue
+                            if i_code in line_info_dict:
+                                info = line_info_dict[i_code]
+                                i_line = info['製造ライン']
+                                i_name = info['品目名']
+                                i_vol = info['容量_L']
+                                i_recipe = info['中身設計コード']
+                            else:
+                                zai_row_lookup = df_zai_in_zai[df_zai_in_zai['品目コード'] == i_code]
+                                i_name = zai_row_lookup['品目名'].iloc[0] if not zai_row_lookup.empty else i_code
+                                i_vol = extract_volume_safe(i_name)
+                                i_recipe = extract_content_code(i_code)
+                                if factory_mode == "本社":
+                                    # 本社ライン割り当てルールと同一ロジック
+                                    if i_code in ('H0690020', 'H0690000', 'H0690030', 'H0390000'):
+                                        i_line = '6号機'
+                                    elif i_code == 'H0620030' or any(k in i_name for k in ['再生材', 'もう一土元気']) or any(k in i_name for k in ['腐葉土', '堆肥', '特大袋']):
+                                        i_line = '3号機'
+                                    elif i_vol < 10:
+                                        i_line = 'その他'
+                                    elif i_vol <= 25:
+                                        i_line = '5号機'
+                                    elif i_vol <= 26:
+                                        i_line = '2号機'
+                                    else:
+                                        i_line = '6号機'
+                                else:
+                                    i_line = 'その他'
+                            confirmed_jobs.append({
+                                '日付': i_date, 'ライン': i_line, '配合コード': i_recipe,
+                                '品目コード': i_code, '品目名': i_name, '数量': i_qty, '容量_L': i_vol
+                            })
+
+                    del df_master_combined, df_final, grouped
+                    gc.collect()
+
+                    # =====================================================================
+                    # 🌟 lines_list（本社：その他を追加）
+                    # =====================================================================
+                    lines_list = ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機", "その他"]
+                    def _build_line_queue(df_line):
+                        """月度順にグループ化し、各月内で容量近接ソートを適用"""
+                        jobs_seq = []
+                        for _m in sorted(df_line['対象月度'].unique(), key=lambda x: _month_order.get(x, 99)):
+                            jobs_seq.extend(sort_jobs_by_size_proximity(df_line[df_line['対象月度'] == _m]))
+                        return jobs_seq
+                    queues_base = {line: _build_line_queue(df_final_sorted[df_final_sorted['製造ライン'] == line]) for line in lines_list}
+
+                    def run_sim(ov_mins):
+                        queues = copy.deepcopy(queues_base)
+                        cur_idx = {l: 0 for l in queues}
+                        for l in queues:
+                            for j in queues[l]: j['rem'] = j['計画製造袋数']
+
+                        loop_d = get_next_w_date(period_start, holidays_input)
+                        day_cnt = 1; sched = []
+
+                        while True:
+                            active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and job_can_support(l, j, factory_mode) for ol in lines_list if ol != l for j in queues[ol])]
+                            if not active: break
+
+                            if factory_mode == "関西工場":
+                                run_today = active
+                            else:
+                                _fa = [l for l in ['2号機', '3号機', '5号機', '6号機'] if l in active]
+                                _oa = ['その他'] if 'その他' in active else []
+                                if len(_fa) == 4:
+                                    run_today = _fa + _oa
+                                elif any(l in _fa for l in ['3号機', '5号機']) and ('5号機' in _fa or not any(l in _fa for l in ['2号機', '6号機'])):
+                                    run_today = [l for l in ['3号機', '5号機'] if l in _fa] + _oa
+                                else:
+                                    run_today = [l for l in ['2号機', '6号機'] if l in _fa] + _oa
+
+                            # 稼働時間：月〜木430分/金400分 を基本とし、月によって調整
+                            # 7月・8月・12月: 1時間短縮、3月・4月: 1時間延長（カレンダー月基準）
+                            _base_cap = 400.0 if loop_d.weekday() == 4 else 430.0
+                            _month_adj = -60.0 if loop_d.month in (7, 8, 12) else (60.0 if loop_d.month in (3, 4) else 0.0)
+                            cap_limit = _base_cap + _month_adj + ov_mins
+                            w_kanji = ["月", "火", "水", "木", "金", "土", "日"][loop_d.weekday()]
+                            d_str_disp = loop_d.strftime("%Y/%m/%d")
+
+                            for line in run_today:
+                                spent = 0.0; p_rec = None; p_vol = None
+
+                                day_confirmed = [cj for cj in confirmed_jobs if cj['日付'] == loop_d and cj['ライン'] == line]
+                                for cj in day_confirmed:
+                                    sp_min_c = get_sp(line, cj['容量_L'], factory_mode, cj['品目コード']) / 60
+                                    dur_c = cj['数量'] / sp_min_c if sp_min_c > 0 else 0.0
+                                    sw_c = 5.0 if spent > 0 and p_rec == cj['配合コード'] and p_vol and p_vol > cj['容量_L'] else (10.0 if spent > 0 else 0.0)
+                                    sched.append({'稼働日': f"{day_offset + day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': cj['配合コード'], '品目コード': cj['品目コード'], '品目名': cj['品目名'], '指示数量(袋)': int(cj['数量']), '製造時間(分)': round(dur_c, 1), '切り替え(分)': round(sw_c, 1), '合計拘束時間(分)': round(sw_c + dur_c, 1), '備考': '製造指示済', '製造理由': '製造指示済', '対象月度': f"{cj['日付'].month}月度", 't_start': spent + sw_c, 't_end': spent + sw_c + dur_c})
+                                    spent += sw_c + dur_c
+                                    p_rec = cj['配合コード']; p_vol = cj['容量_L']
+
+                                while spent < cap_limit:
+                                    idx = cur_idx[line]
+                                    if idx < len(queues[line]):
+                                        job = queues[line][idx]
+                                        # 同月度内計画: 対象月度がまだ来ていないジョブは当日処理しない
+                                        if _month_order.get(job.get('対象月度', _first_month), 0) > _month_order.get(loop_d.month, 99):
+                                            break
+                                        sw = 5.0 if spent > 0 and p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
+                                        avail = cap_limit - spent - sw
+                                        if avail <= 5.0: break
+
+                                        sp_min = get_sp(line, job['容量_L'], factory_mode, job['品目コード']) / 60
+                                        max_b = avail * sp_min
+
+                                        if job['rem'] <= max_b:
+                                            b_make = job['rem']; dur = b_make / sp_min
+                                            sched.append({'稼働日': f"{day_offset + day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': '全量完了', '製造理由': job['製造理由'], '対象月度': f"{job.get('対象月度', '')}月度", 't_start': spent + sw, 't_end': spent + sw + dur})
+                                            spent += sw + dur; job['rem'] = 0; cur_idx[line] += 1
+                                            p_rec = job['中身設計コード']; p_vol = job['容量_L']
+                                        else:
+                                            b_make = math.floor(max_b)
+                                            if b_make <= 0: break
+                                            dur = b_make / sp_min
+                                            sched.append({'稼働日': f"{day_offset + day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': '翌日へ継続', '製造理由': job['製造理由'], '対象月度': f"{job.get('対象月度', '')}月度", 't_start': spent + sw, 't_end': spent + sw + dur})
+                                            spent += sw + dur; job['rem'] -= b_make
+                                            p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
+                                    else:
+                                        sup_found = False
+                                        for o_line in lines_list:
+                                            if o_line == line: continue
+                                            for job in queues[o_line]:
+                                                if job['rem'] > 0 and _month_order.get(job.get('対象月度', _first_month), 0) <= _month_order.get(loop_d.month, 99) and job_can_support(line, job, factory_mode):
+                                                    sw = 10.0; avail = cap_limit - spent - sw
+                                                    if avail <= 5.0: break
+                                                    sp_min = (646 if line == '5号機' else 500) / 60 if factory_mode == "関西工場" else ((730 if job['容量_L'] in [12, 14] else 650) if line == '5号機' else 400) / 60
+                                                    max_b = avail * sp_min
+                                                    if job['rem'] <= max_b:
+                                                        b_make = job['rem']; dur = b_make / sp_min
+                                                        sched.append({'稼働日': f"{day_offset + day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': f"★{o_line}応援(全量)", '製造理由': job['製造理由'], '対象月度': f"{job.get('対象月度', '')}月度", 't_start': spent + sw, 't_end': spent + sw + dur})
+                                                        spent += sw + dur; job['rem'] = 0; sup_found = True; p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
+                                                    else:
+                                                        b_make = math.floor(max_b)
+                                                        if b_make <= 0: break
+                                                        dur = b_make / sp_min
+                                                        sched.append({'稼働日': f"{day_offset + day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': f"★{o_line}応援(継続)", '製造理由': job['製造理由'], '対象月度': f"{job.get('対象月度', '')}月度", 't_start': spent + sw, 't_end': spent + sw + dur})
+                                                        spent += sw + dur; job['rem'] -= b_make; sup_found = True; p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
+                                            if sup_found: break
+                                        if not sup_found: break
+                            loop_d = get_next_w_date(loop_d + datetime.timedelta(days=1), holidays_input)
+                            day_cnt += 1
+                            if day_cnt > 60: break
+                        return sched, day_cnt - 1
+
+                    ov_res = 0
+                    full_sched, gen_days = run_sim(0)
+                    if gen_days > target_bd:
+                        _fit_found = False
+                        _last_ts, _last_td, _last_ov = full_sched, gen_days, 0
+                        for t_ov in [30, 60, 90, 120, 150, 180, 210]:
+                            ts, td = run_sim(t_ov)
+                            _last_ts, _last_td, _last_ov = ts, td, t_ov
+                            if td <= target_bd:
+                                ov_res = t_ov; full_sched = ts; gen_days = td; _fit_found = True; break
+                        if not _fit_found:
+                            # 最大残業でも月内に収まらない場合は、最も日数の短い（最大OT）結果を採用
+                            ov_res = _last_ov; full_sched = _last_ts; gen_days = _last_td
+
+                    df_final_sorted['対象月度'] = month_label
+                    for _j in full_sched: _j['対象月度'] = month_label
+                    return full_sched, df_final_sorted, gen_days, ov_res
+
+                # =====================================================================
+                # 🌟 月度ごとに独立して計画を実行（各月の計画はその月内でスケジュール）
+                # =====================================================================
+                def _year_for_month(m):
+                    _t = datetime.date.today()
+                    y = _t.year
+                    if m < _t.month - 6: y += 1
+                    return y
+
+                full_sched = []
+                _df_frames = []
+                _day_offset = 0
+                _cursor = start_date
+                _summary = []
+
+                for _pi, (_m_num, _p_idx_d, _a_idx_d) in enumerate(month_col_pairs):
+                    # この月度の計画残数をdf_m_distinctの月別列から取得
+                    _zan_col = f'残数_{_m_num}'
+                    if _zan_col in df_m_distinct.columns:
+                        _df_mp = df_m_distinct[['品目コード', '品目名_計画書']].copy()
+                        _df_mp['選択月_計画残数'] = df_m_distinct[_zan_col].values
+                    else:
+                        _df_mp = df_m_distinct[['品目コード', '品目名_計画書', '選択月_計画残数']].copy()
+
+                    # 期間開始日・終了日を決定
+                    if _pi == 0:
+                        _p_start = start_date
+                    else:
+                        _m_first = datetime.date(_year_for_month(_m_num), _m_num, 1)
+                        _p_start = max(_m_first, _cursor)
+                    _p_end = _get_month_end(f"{_m_num}月", datetime.date.today())
+                    if plan_to_yearend:
+                        _target_bd = _count_business_days(_p_start, _p_end, holidays_input)
+                    else:
+                        _target_bd = target_days
+
+                    _sched_p, _dfs_p, _days_p, _ov_p = _plan_period(
+                        _df_mp,
+                        use_inventory=(_pi == 0),
+                        use_confirmed=(_pi == 0),
+                        period_start=_p_start,
+                        target_bd=_target_bd,
+                        day_offset=_day_offset,
+                        month_label=_m_num
+                    )
+                    full_sched.extend(_sched_p)
+                    if not _dfs_p.empty:
+                        _df_frames.append(_dfs_p)
+                    _day_offset += _days_p
+                    if _sched_p:
+                        _last_d = max(datetime.datetime.strptime(j['製造日'], "%Y/%m/%d").date() for j in _sched_p)
+                        _cursor = _last_d + datetime.timedelta(days=1)
+                    else:
+                        _cursor = max(_cursor, _p_start)
+                    _summary.append((_m_num, _days_p, _ov_p, _p_end, _target_bd))
+
+                df_final_sorted = pd.concat(_df_frames, ignore_index=True) if _df_frames else pd.DataFrame()
+                if df_final_sorted.empty:
+                    st.warning("計画対象となる品目がありません。")
+                    st.stop()
+
+                # 月度別サマリー表示
+                for (_m_num, _days_p, _ov_p, _p_end, _tbd_p) in _summary:
+                    if _days_p == 0:
+                        st.info(f"ℹ️ {_m_num}月度: 計画対象なし")
+                    elif _days_p > _tbd_p:
+                        st.error(f"🚨 {_m_num}月度: 最大残業（{_ov_p}分/日）でも月内（{_p_end.strftime('%m/%d')}・{_tbd_p}営業日）に収まらず、【{_days_p}日間】かかり翌月度に食い込みます。翌月度の計画開始はその分後ろ倒しになります。")
+                    elif _ov_p > 0:
+                        st.warning(f"📢 {_m_num}月度: 月内（{_p_end.strftime('%m/%d')}まで）に収めるため毎日一律【{_ov_p}分】の残業が必要です（{_days_p}日間）。")
+                    else:
+                        st.success(f"🟢 {_m_num}月度: 残業不要・【{_days_p}日間】で完了します。")
+
+                lines_list = ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機", "その他"]
 
                 wb = Workbook(); wb.remove(wb.active)
                 navy = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
@@ -1362,12 +1490,12 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 b_all = Border(left=Side(style="thin", color="D9D9D9"), right=Side(style="thin", color="D9D9D9"), top=Side(style="thin", color="D9D9D9"), bottom=Side(style="thin", color="D9D9D9"))
 
                 ws1 = wb.create_sheet(title="製造品目・バッチ集計"); ws1.views.sheetView[0].showGridLines = True
-                ws1.append(["品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "今月の計画残数", "決定製造m3", "最終製造総数(袋)", "製造理由"])
-                for _, r in df_final_sorted.iterrows(): ws1.append([r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], r['安全割れ不足数'], r['今月の計画残数'], r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
+                ws1.append(["対象月度", "品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "当月度の計画残数", "決定製造m3", "最終製造総数(袋)", "製造理由"])
+                for _, r in df_final_sorted.iterrows(): ws1.append([f"{r.get('対象月度', '')}月度", r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], r['安全割れ不足数'], r['今月の計画残数'], r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
 
                 ws2 = wb.create_sheet(title="日別・号機別製造計画"); ws2.views.sheetView[0].showGridLines = True
-                ws2.append(["稼働日", "製造日", "曜日", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
-                for j in full_sched: ws2.append([j['稼働日'], j['製造日'], j['曜日'], j['製造ライン'], j['配合コード'], j['品目コード'], j['品目名'], j['指示数量(袋)'], j['製造時間(分)'], j['切り替え(分)'], j['合計拘束時間(分)'], j['備考'], j['製造理由']])
+                ws2.append(["稼働日", "製造日", "曜日", "対象月度", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
+                for j in full_sched: ws2.append([j['稼働日'], j['製造日'], j['曜日'], f"{j.get('対象月度', '')}月度" if j.get('対象月度', '') != '' else '', j['製造ライン'], j['配合コード'], j['品目コード'], j['品目名'], j['指示数量(袋)'], j['製造時間(分)'], j['切り替え(分)'], j['合計拘束時間(分)'], j['備考'], j['製造理由']])
 
                 ws3 = wb.create_sheet(title="日別・30分タイムテーブル"); ws3.views.sheetView[0].showGridLines = True
                 slots = ["8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", "10:00〜10:10(休憩)", "10:10〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", "12:00〜13:00(昼休)", "13:00〜13:30", "13:30〜14:00", "14:00〜14:30", "14:30〜15:00", "15:00〜15:10(休憩)", "15:10〜15:30", "15:30〜16:00", "16:00〜16:30", "16:30〜17:00", "17:00〜17:30", "17:30〜18:00", "18:00〜18:30", "18:30〜19:00", "19:00〜19:30", "19:30〜20:00"]

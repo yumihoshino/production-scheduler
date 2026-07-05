@@ -931,6 +931,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 code_col_idx = next((c for c in range(min(5, len(df_monthly_raw.columns))) if any(kw in str(df_monthly_raw.iloc[item_row_idx, c]) for kw in ['商品CD', '品目コード', 'コード', '商品', '商品CODE'])), 0)
                 name_col_idx = next((c for c in range(min(5, len(df_monthly_raw.columns))) if any(kw in str(df_monthly_raw.iloc[item_row_idx, c]) for kw in ['商品名', '品目名', '名', '品名'])), 1)
 
+                # 生産ロット列（CA列基準）の検出：見出しに「ロット」を含む列を優先、無ければCA列(79列目)
+                _lot_col_idx = None
+                for _hr in _hdr_scan_rows:
+                    _vals_l = _hdr_rows_vals[_hr]
+                    _lot_col_idx = next((c for c, t in enumerate(_vals_l) if 'ロット' in t or 'ﾛｯﾄ' in t), None)
+                    if _lot_col_idx is not None: break
+                if _lot_col_idx is None and df_monthly_raw.shape[1] > 78:
+                    _lot_col_idx = 78  # CA列
+                lot_dict = {}
+                if _lot_col_idx is not None:
+                    for _li in range(item_row_idx + 1, len(df_monthly_raw)):
+                        _lc = str(df_monthly_raw.iloc[_li, code_col_idx]).strip()
+                        _lv = pd.to_numeric(df_monthly_raw.iloc[_li, _lot_col_idx], errors='coerce')
+                        if _lc and _lc not in ('nan', 'None', '') and not pd.isna(_lv) and _lv > 0 and _lc not in lot_dict:
+                            lot_dict[_lc] = float(_lv)
+                if lot_dict:
+                    st.info(f"📦 生産ロット指定（CA列）を検出: {len(lot_dict)}品目。ロット記載品はロット単位で切上げ、未記載品は従来のm3バッチで計算します。")
+
                 df_m = df_monthly_raw.iloc[item_row_idx+1:].copy()
                 # 月ごとの計画残数（予定−実績、マイナスは0）を月別に保持しつつ合計も計算する
                 _total_zan = None
@@ -1034,23 +1052,32 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         axis=1
                     )
                     df_master_combined['中身設計コード'] = df_master_combined['品目コード'].apply(extract_content_code)
+                    df_master_combined['生産ロット'] = df_master_combined['品目コード'].map(lot_dict).fillna(0.0)
 
                     def calc_batch(group_df):
                         name = group_df['品目名'].iloc[0]
                         is_kasei = '化成肥料' in name and 'ｺｰﾅﾝ' in name
+                        # kg品のみのグループは重量ベース（1000kg単位）でバッチを計算する
+                        # （m3単位と混同すると袋数がほぼ0になり計画から脱落するため）
+                        is_all_kg = bool(group_df['kg品フラグ'].all()) if 'kg品フラグ' in group_df.columns else False
                         total = group_df['ベース必要容量_L'].sum()
-                        if is_kasei:
+                        if is_kasei or is_all_kg:
                             batches = math.ceil(total / 1000)
                             return float(batches * 1000)
                         else:
                             m3 = (total / 0.9) / 1000
                             return 5.0 if m3 <= 5.0 else (10.0 if m3 <= 10.0 else float(math.ceil(m3 / 10.0) * 10.0))
 
-                    grouped = df_master_combined.groupby(['中身設計コード', '対象月度']).apply(
-                        lambda g: pd.Series({'ベース必要容量_L': g['ベース必要容量_L'].sum(),
-                                             '製造決定_m3': calc_batch(g),
-                                             'kg品フラグ': g['kg品フラグ'].any()})
-                    ).reset_index()
+                    # ロット記載品は個別にロット単位で切上げるため、m3バッチ集計から除外する
+                    _df_batch_src = df_master_combined[df_master_combined['生産ロット'] <= 0]
+                    if not _df_batch_src.empty:
+                        grouped = _df_batch_src.groupby(['中身設計コード', '対象月度']).apply(
+                            lambda g: pd.Series({'ベース必要容量_L': g['ベース必要容量_L'].sum(),
+                                                 '製造決定_m3': calc_batch(g),
+                                                 'kg品フラグ': g['kg品フラグ'].any()})
+                        ).reset_index()
+                    else:
+                        grouped = pd.DataFrame(columns=['中身設計コード', '対象月度', 'ベース必要容量_L', '製造決定_m3', 'kg品フラグ'])
 
                     df_final = df_master_combined.merge(grouped[['中身設計コード', '対象月度', '製造決定_m3', 'kg品フラグ']], on=['中身設計コード', '対象月度'], how='left', suffixes=('', '_g'))
                     df_final['製造決定_m3'] = df_final['製造決定_m3'].fillna(0.0)
@@ -1062,6 +1089,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
 
                     def calc_bags(r):
+                        # 生産ロット記載品: 計画数量をロット単位で切上げ（CA列基準）
+                        _lot = r.get('生産ロット', 0)
+                        if _lot and _lot > 0:
+                            _base_q = r['採用ベース数量']
+                            return int(math.ceil(_base_q / _lot) * _lot) if _base_q > 0 else 0
                         name_str = str(r['品目名'])
                         if any(k in name_str for k in KEYWORDS_4GO_LOT):
                             base_qty = r['採用ベース数量']
@@ -1077,7 +1109,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                     df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
                     df_final['製造理由'] = df_final.apply(lambda r: ('計画未達' if r.get('対象月度', _first_month) != _first_month else ('現在庫がマイナス' if not pd.isna(r['現在の在庫']) and r['現在の在庫'] < 0 else ('安全在庫割れ' if r['安全割れ不足数'] > 0 else '計画未達'))), axis=1)
-                    df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1)
+                    df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 and r.get('生産ロット', 0) <= 0 else r['計画製造袋数'], axis=1)
                     df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: any(k in str(n) for k in ['腐葉土', '堆肥', '特大袋']))
 
                     # =====================================================================
@@ -1222,11 +1254,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         for recipe_code in multi_line_recipes:
                             recipe_mask = (df['中身設計コード'] == recipe_code[0]) & (df['対象月度'] == recipe_code[1])
                             for line, line_grp in df[recipe_mask].groupby('製造ライン'):
+                                # ロット記載品はライン別再バッチの対象外
+                                if '生産ロット' in line_grp.columns:
+                                    line_grp = line_grp[line_grp['生産ロット'] <= 0]
+                                if line_grp.empty:
+                                    continue
                                 name_str = str(line_grp['品目名'].iloc[0])
                                 is_kasei = '化成肥料' in name_str and 'ｺｰﾅﾝ' in name_str
+                                is_all_kg = bool(line_grp['kg品フラグ'].all()) if 'kg品フラグ' in line_grp.columns else False
                                 total_vol = line_grp['ベース必要容量_L'].sum()
 
-                                if is_kasei:
+                                if is_kasei or is_all_kg:
                                     new_m3 = float(math.ceil(total_vol / 1000) * 1000)
                                 else:
                                     m3 = (total_vol / 0.9) / 1000
@@ -1243,8 +1281,16 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     # バッチ再計算後に袋数を更新
                     df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
                     df_final['計画製造袋数'] = df_final.apply(
-                        lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 else r['計画製造袋数'], axis=1
+                        lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 and r.get('生産ロット', 0) <= 0 else r['計画製造袋数'], axis=1
                     )
+                    # ロット品の決定m3表示を実数換算（表示用）
+                    def _m3_disp(r):
+                        if r.get('生産ロット', 0) > 0 and r['計画製造袋数'] > 0:
+                            if r.get('kg品フラグ', False):
+                                return round(r['計画製造袋数'] * r['kg重量'], 1)
+                            return round(r['計画製造袋数'] * max(r['容量_L'], 1) / 900.0, 1)
+                        return r['製造決定_m3']
+                    df_final['製造決定_m3'] = df_final.apply(_m3_disp, axis=1)
 
                     df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                     df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
@@ -1507,8 +1553,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 b_all = Border(left=Side(style="thin", color="D9D9D9"), right=Side(style="thin", color="D9D9D9"), top=Side(style="thin", color="D9D9D9"), bottom=Side(style="thin", color="D9D9D9"))
 
                 ws1 = wb.create_sheet(title="製造品目・バッチ集計"); ws1.views.sheetView[0].showGridLines = True
-                ws1.append(["対象月度", "品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "当月度の計画残数", "決定製造m3", "最終製造総数(袋)", "製造理由"])
-                for _, r in df_final_sorted.iterrows(): ws1.append([f"{r.get('対象月度', '')}月度", r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], r['安全割れ不足数'], r['今月の計画残数'], r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
+                ws1.append(["対象月度", "品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "当月度の計画残数", "生産ロット", "決定製造m3", "最終製造総数(袋)", "製造理由"])
+                for _, r in df_final_sorted.iterrows(): ws1.append([f"{r.get('対象月度', '')}月度", r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], r['安全割れ不足数'], r['今月の計画残数'], (int(r['生産ロット']) if r.get('生産ロット', 0) > 0 else ""), r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
 
                 ws2 = wb.create_sheet(title="日別・号機別製造計画"); ws2.views.sheetView[0].showGridLines = True
                 ws2.append(["稼働日", "製造日", "曜日", "対象月度", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])

@@ -817,18 +817,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     target_month_num = int(target_month.replace("月", ""))
                 except: pass
 
-                # 月ラベル列の位置を全てスキャン
+                # 月ラベル列の位置を全てスキャン（見出しより上の全行・部分一致で頑健に検出）
                 month_label_cols = []
+                _seen_cols = set()
                 if item_row_idx >= 1:
-                    for r_scan in range(max(0, item_row_idx - 3), item_row_idx):
+                    for r_scan in range(0, item_row_idx):
                         for c_scan in range(df_monthly_raw.shape[1]):
+                            if c_scan in _seen_cols:
+                                continue
                             cell_val = df_monthly_raw.iloc[r_scan, c_scan]
                             if cell_val is not None:
-                                m = re.match(r'^(\d{1,2})月度?$', str(cell_val).strip())
-                                if m:
-                                    month_label_cols.append((c_scan, int(m.group(1))))
-                        if month_label_cols:
-                            break
+                                cell_str = str(cell_val).strip()
+                                # 「7月」「7月度」「2026年7月」「7月度計画」等を許容
+                                m = re.search(r'(\d{1,2})\s*月', cell_str)
+                                if m and not re.search(r'\d{1,2}\s*月\s*\d{1,2}\s*日', cell_str):
+                                    mn = int(m.group(1))
+                                    if 1 <= mn <= 12:
+                                        month_label_cols.append((c_scan, mn))
+                                        _seen_cols.add(c_scan)
                     month_label_cols.sort(key=lambda x: x[0])
 
                 def _find_month_block(month_num):
@@ -842,13 +848,19 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 header_row_vals = [str(v).strip() for v in df_monthly_raw.iloc[item_row_idx].values]
 
                 def _find_plan_actual_cols(b_start, b_end):
-                    """ブロック内の予定・実績列インデックスを返す"""
+                    """ブロック内の予定・実績列インデックスを返す（見出し欠落時はブロック位置から推定）"""
                     p_idx = None; a_idx = None
                     rng = range(b_start, b_end) if b_start is not None else range(len(header_row_vals))
                     for search_c in rng:
                         col_text = header_row_vals[search_c]
                         if ('予定' in col_text or '計画' in col_text) and p_idx is None: p_idx = search_c
                         elif '実績' in col_text and a_idx is None: a_idx = search_c
+                    # フォールバック: 見出しテキストが無い月でも、ブロックの構造から推定
+                    if b_start is not None:
+                        if p_idx is not None and a_idx is None and p_idx + 1 < b_end:
+                            a_idx = p_idx + 1  # 予定の右隣を実績とみなす
+                        elif p_idx is None and a_idx is None and b_end - b_start >= 2:
+                            p_idx = b_start; a_idx = b_start + 1  # ブロック先頭2列を予定・実績とみなす
                     return p_idx, a_idx
 
                 # 対象月リストを決定（期末一括なら対象月〜10月度、通常は対象月のみ）
@@ -900,9 +912,18 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     '選択月_製造実績': _total_actual.values
                 })
                 df_m_clean['選択月_計画残数'] = _total_zan.values
-                if plan_to_yearend and len(month_col_pairs) > 1:
-                    _m_names = "、".join(f"{m}月度" for m, _, _ in month_col_pairs)
+                if plan_to_yearend:
+                    _found_months = [m for m, _, _ in month_col_pairs]
+                    _missing_months = [m for m in months_to_plan if m not in _found_months]
+                    _m_names = "、".join(f"{m}月度" for m in _found_months)
                     st.info(f"📆 期末一括計画モード: {_m_names} の計画残数を合算して計画します。")
+                    if _missing_months:
+                        _miss_names = "、".join(f"{m}月度" for m in _missing_months)
+                        st.warning(
+                            f"⚠️ {_miss_names} の計画列が月間計画書から検出できませんでした。"
+                            f"該当月の月ラベル（例:「8月度」）と「予定」「実績」列の見出しをご確認ください。"
+                            f"（検出済み月ラベル位置: {[(c, f'{m}月') for c, m in month_label_cols]}）"
+                        )
                 df_m_distinct = df_m_clean[df_m_clean['品目コード'].notna() & (~df_m_clean['品目コード'].isin(['nan', '', 'None']))].drop_duplicates(subset=['品目コード'])
 
                 del df_monthly_raw, df_m, df_m_clean

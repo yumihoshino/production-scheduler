@@ -811,7 +811,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_monthly_raw = load_excel_sheets_merged(
                     file_gekkan,
                     _gekkan_keywords,
-                    exclude_keywords=["天川"] if factory_mode == "本社" else None
+                    exclude_keywords=["天川"] if factory_mode == "本社" else ["外製", "参考"]
                 )
                 # 読み込んだシートを画面に表示（複数シートが正しく読まれているかの確認用）
                 _sheets_read = getattr(load_excel_sheets_merged, 'last_matched', [])
@@ -864,23 +864,40 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             return col_pos, b_end
                     return None, None
 
-                header_row_vals = [str(v).strip() for v in df_monthly_raw.iloc[item_row_idx].values]
+                # 予定・実績の見出しは「商品CODE行」自体か「その1つ下の行」にあるレイアウトの両方に対応
+                _hdr_scan_rows = [item_row_idx]
+                if item_row_idx + 1 < len(df_monthly_raw):
+                    _hdr_scan_rows.append(item_row_idx + 1)
+                _hdr_rows_vals = {r: [str(v).strip() for v in df_monthly_raw.iloc[r].values] for r in _hdr_scan_rows}
 
                 def _find_plan_actual_cols(b_start, b_end):
-                    """ブロック内の予定・実績列インデックスを返す（見出し欠落時はブロック位置から推定）"""
-                    p_idx = None; a_idx = None
-                    rng = range(b_start, b_end) if b_start is not None else range(len(header_row_vals))
-                    for search_c in rng:
-                        col_text = header_row_vals[search_c]
-                        if ('予定' in col_text or '計画' in col_text) and p_idx is None: p_idx = search_c
-                        elif '実績' in col_text and a_idx is None: a_idx = search_c
-                    # フォールバック: 見出しテキストが無い月でも、ブロックの構造から推定
-                    if b_start is not None:
-                        if p_idx is not None and a_idx is None and p_idx + 1 < b_end:
-                            a_idx = p_idx + 1  # 予定の右隣を実績とみなす
-                        elif p_idx is None and a_idx is None and b_end - b_start >= 2:
-                            p_idx = b_start; a_idx = b_start + 1  # ブロック先頭2列を予定・実績とみなす
-                    return p_idx, a_idx
+                    """ブロック内の予定・実績列インデックスを返す。
+                    「製造予定」「製造実績」の完全一致を最優先し、次に部分一致、
+                    どちらも無い場合のみブロック位置から推定する。"""
+                    rng = list(range(b_start, b_end)) if b_start is not None else list(range(df_monthly_raw.shape[1]))
+                    # パス1: 「製造予定」「製造実績」の厳密一致（月末在庫・出荷予測との誤認防止）
+                    for _hr in _hdr_scan_rows:
+                        vals = _hdr_rows_vals[_hr]
+                        p_idx = next((c for c in rng if c < len(vals) and '製造予定' in vals[c]), None)
+                        a_idx = next((c for c in rng if c < len(vals) and '製造実績' in vals[c]), None)
+                        if p_idx is not None and a_idx is not None:
+                            return p_idx, a_idx
+                    # パス2: 「予定」「計画」/「実績」の部分一致（「予測」は除外）
+                    for _hr in _hdr_scan_rows:
+                        vals = _hdr_rows_vals[_hr]
+                        p_idx = None; a_idx = None
+                        for c in rng:
+                            t = vals[c] if c < len(vals) else ''
+                            if ('予定' in t or '計画' in t) and '予測' not in t and p_idx is None: p_idx = c
+                            elif '実績' in t and a_idx is None: a_idx = c
+                        if p_idx is not None and a_idx is not None:
+                            return p_idx, a_idx
+                        if p_idx is not None and a_idx is None and b_start is not None and p_idx + 1 < b_end:
+                            return p_idx, p_idx + 1  # 予定の右隣を実績とみなす
+                    # パス3: ブロック先頭2列を予定・実績とみなす（最終手段）
+                    if b_start is not None and b_end - b_start >= 2:
+                        return b_start, b_start + 1
+                    return None, None
 
                 # 対象月リストを決定（期末一括なら対象月〜10月度、通常は対象月のみ）
                 if plan_to_yearend and target_month_num is not None:

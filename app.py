@@ -4,7 +4,6 @@ import numpy as np
 import math
 import re
 import io
-from mrp_link import mrp_link_button
 import os
 import copy
 import datetime
@@ -550,6 +549,25 @@ LINE_SPEED_PRIORITY = {
 _KEYWORDS_4GO = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
                  'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
 
+# 本社ライン固定商品一覧（ライン固定一覧20260706.xlsxのD列「指定機械」より・54品目）
+HONSHA_FIXED_LINE = {
+    'H0120620': '2号機', 'H0120630': '2号機', 'H0220230': '2号機', 'H0500110': '2号機',
+    'H0500120': '2号機', 'H0510140': '2号機', 'H0520870': '2号機', 'H0521060': '2号機',
+    'H0100600': '3号機', 'H0101800': '3号機', 'H0190000': '3号機', 'H0190100': '3号機',
+    'H0191000': '3号機', 'H0200050': '3号機', 'H0280520': '3号機', 'H0280560': '3号機',
+    'H0280570': '3号機', 'H0280580': '3号機', 'H0280590': '3号機', 'H0300000': '3号機',
+    'H0300080': '3号機', 'H0400000': '3号機', 'H0400020': '3号機', 'H0400400': '3号機',
+    'H0420650': '3号機', 'H0420750': '3号機', 'H0480050': '3号機', 'H0480120': '3号機',
+    'H0480140': '3号機', 'H0520820': '3号機', 'H0581140': '3号機', 'H0581150': '3号機',
+    'H0680170': '3号機',
+    'H0101210': '5号機', 'H0101220': '5号機', 'H0101230': '5号機', 'H0101240': '5号機',
+    'H0225000': '5号機', 'H0225270': '5号機', 'H0225300': '5号機', 'H0410620': '5号機',
+    'H0581260': '5号機',
+    'H0290040': '6号機', 'H0290130': '6号機', 'H0290150': '6号機', 'H0390080': '6号機',
+    'H0581190': '6号機', 'H0590060': '6号機', 'H0590190': '6号機', 'H0590250': '6号機',
+    'H0590440': '6号機', 'H0590450': '6号機', 'H0590670': '6号機', 'H0590800': '6号機',
+}
+
 def get_capable_lines(vol, name, code, is_compost, f_mode):
     """物理的に製造可能なラインのリストを返す（速度優先ではなく物理制約のみ）"""
     code_str = str(code)
@@ -559,6 +577,9 @@ def get_capable_lines(vol, name, code, is_compost, f_mode):
         # 固定コード
         if code_str in ('H0690020', 'H0690000', 'H0690030', 'H0390000'):
             return ['6号機']
+        # ライン固定商品一覧（20260706）に記載の品目
+        if code_str in HONSHA_FIXED_LINE:
+            return [HONSHA_FIXED_LINE[code_str]]
         # 堆肥・腐葉土・再生材系
         if code_str == 'H0620030' or any(k in name_str for k in ['再生材', 'もう一土元気']) or is_compost:
             return ['3号機']
@@ -1186,11 +1207,12 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         #   27L以上              → 6号機
                         df_final['製造ライン'] = df_final.apply(lambda r:
                             '6号機' if r['品目コード'] in ('H0690020', 'H0690000', 'H0690030', 'H0390000')
+                            else (HONSHA_FIXED_LINE[r['品目コード']] if r['品目コード'] in HONSHA_FIXED_LINE
                             else ('3号機' if r['品目コード'] == 'H0620030' or any(k in r['品目名'] for k in ['再生材', 'もう一土元気']) or r['堆肥・腐葉土フラグ']
                             else ('その他' if r['容量_L'] < 10
                             else ('5号機' if r['容量_L'] <= 25
                             else ('2号機' if r['容量_L'] <= 26
-                            else '6号機')))), axis=1)
+                            else '6号機'))))), axis=1)
                         # 同一配合サイズ違いを可能な限り同一ラインに統一
                         df_final = unify_recipe_lines(df_final, factory_mode)
                     else:
@@ -1377,6 +1399,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     # 本社ライン割り当てルールと同一ロジック
                                     if i_code in ('H0690020', 'H0690000', 'H0690030', 'H0390000'):
                                         i_line = '6号機'
+                                    elif i_code in HONSHA_FIXED_LINE:
+                                        i_line = HONSHA_FIXED_LINE[i_code]
                                     elif i_code == 'H0620030' or any(k in i_name for k in ['再生材', 'もう一土元気']) or any(k in i_name for k in ['腐葉土', '堆肥', '特大袋']):
                                         i_line = '3号機'
                                     elif i_vol < 10:
@@ -1798,5 +1822,4 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 out_io = io.BytesIO(); wb.save(out_io); out_io.seek(0)
                 _fname_period = f"{target_month}度〜10月度(期末)" if plan_to_yearend else f"{target_month}度"
                 st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{_fname_period}_スケジュール表.xlsx")
-                mrp_link_button(out_io.getvalue(), site=factory_mode)
             except Exception as e: st.error(f"計算実行エラー: {e}")

@@ -4,6 +4,7 @@ import numpy as np
 import math
 import re
 import io
+from mrp_link import mrp_link_button
 import os
 import copy
 import datetime
@@ -1797,4 +1798,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 out_io = io.BytesIO(); wb.save(out_io); out_io.seek(0)
                 _fname_period = f"{target_month}度〜10月度(期末)" if plan_to_yearend else f"{target_month}度"
                 st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{_fname_period}_スケジュール表.xlsx")
+                st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{_fname_period}_スケジュール表.xlsx")
+                mrp_link_button(out_io.getvalue(), site=factory_mode)
             except Exception as e: st.error(f"計算実行エラー: {e}")

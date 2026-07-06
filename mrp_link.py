@@ -1,21 +1,14 @@
-"""MRPアプリ（発注リスケ提案ツール）へのスケジュール連携部品。
+"""MRPアプリ（発注リスケ提案ツール）へのスケジュール自動連携部品（v2）。
 
-【製造計画アプリへの組み込み方】
-1. このファイル（mrp_link.py）を製造計画アプリのリポジトリ直下に置く
-2. requirements.txt に requests>=2.31 を追加（無ければ）
-3. Streamlit CloudのSecretsに以下を登録（MRPアプリと同じトークンでOK）:
-       [github]
-       token = "github_pat_..."          # mrp-reschedule-app へのContents R/W権限
-       repo = "yumihoshino/mrp-reschedule-app"
-4. app.py（製造計画アプリ）の、確定版Excelをダウンロードさせている箇所の近くに:
+v1（ボタン方式）はStreamlitの再実行仕様により動作しないため、
+確定版Excelの生成と同時に自動でMRPへ連携する方式に変更。
 
-       from mrp_link import mrp_link_button
-       mrp_link_button(excel_bytes, site="本社")   # excel_bytes = 確定版ExcelのBytes
-       # 関西版の画面なら site="関西工場"
-
-   ※ excel_bytes は st.download_button に渡しているのと同じデータ（bytes）です。
+【組み込み方（v1からの変更）】
+このファイルで production-scheduler の mrp_link.py を丸ごと上書きするだけ。
+app.py の呼び出し（mrp_link_button）はそのままでも動きます。
 """
 import base64
+import hashlib
 import requests
 import streamlit as st
 
@@ -41,22 +34,33 @@ def _save(token: str, repo: str, path: str, content: bytes, message: str):
     return r.status_code in (200, 201), r.json().get("message", "")
 
 
-def mrp_link_button(excel_bytes: bytes, site: str = "本社", key: str | None = None):
-    """確定版スケジュールをMRPアプリへ連携するボタンを表示する。
+def mrp_auto_link(excel_bytes: bytes, site: str = "本社"):
+    """確定版スケジュールを、生成と同時にMRPアプリへ自動連携する。
 
-    site: "本社" または "関西工場"
+    同じ内容を同一セッションで二重送信しないよう、内容のハッシュで判定する。
     """
-    label = f"📤 MRPアプリへ連携（{site}）"
-    if st.button(label, key=key or f"mrp_link_{site}"):
-        gh = st.secrets.get("github", {})
-        if not gh.get("token") or not gh.get("repo"):
-            st.error("連携が未設定です。管理者にご連絡ください（Secretsにgithub設定が必要）。")
-            return
-        path = f"data/製造スケジュール_{site}.xlsx"
-        ok, msg = _save(gh["token"], gh["repo"], path, excel_bytes,
-                        f"製造スケジュール連携（{site}・製造計画アプリから）")
-        if ok:
-            st.success(f"MRPアプリへ連携しました（{site}）。"
-                       "MRPアプリ側は1〜2分後の再読み込みで最新版が使えます。")
-        else:
-            st.error(f"連携に失敗しました: {msg}")
+    gh = st.secrets.get("github", {})
+    if not gh.get("token") or not gh.get("repo"):
+        st.caption("（MRP連携は未設定です。管理者にご連絡ください）")
+        return
+
+    digest = hashlib.md5(excel_bytes).hexdigest()
+    state_key = f"mrp_linked_{site}"
+    if st.session_state.get(state_key) == digest:
+        st.caption(f"✅ この確定版はMRPアプリへ連携済みです（{site}）")
+        return
+
+    path = f"data/製造スケジュール_{site}.xlsx"
+    ok, msg = _save(gh["token"], gh["repo"], path, excel_bytes,
+                    f"製造スケジュール連携（{site}・製造計画アプリから自動送信）")
+    if ok:
+        st.session_state[state_key] = digest
+        st.success(f"📤 MRPアプリへ自動連携しました（{site}）。"
+                   "MRPアプリ側は1〜2分後に最新版が使えます。")
+    else:
+        st.warning(f"MRP連携に失敗しました（スケジュール自体は正常です）: {msg}")
+
+
+# 旧関数名でも動くように残す（v1からの移行用・app.pyの変更不要）
+def mrp_link_button(excel_bytes: bytes, site: str = "本社", key: str | None = None):
+    mrp_auto_link(excel_bytes, site)

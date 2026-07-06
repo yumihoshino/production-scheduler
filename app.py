@@ -94,7 +94,7 @@ def parse_jisseki(df_j):
         df_j['良品数']     = pd.to_numeric(df_j['良品数'], errors='coerce').fillna(0)
         df_j['設備名']     = df_j['設備名'].ffill()
         df_j = df_j[~df_j['設備名'].astype(str).isin({'(なし)', 'nan', ''})]
-        df_j = df_j[df_j['品目コード'].str.startswith('K')]
+        df_j = df_j[df_j['品目コード'].str.match(r'^[KH]\d')]  # 関西=K・本社=H の両方に対応
         df_j['ライン'] = df_j['設備名'].astype(str).str.extract(r'(\d+号機)')
         df_j = df_j.dropna(subset=['ライン'])
         grp = df_j.groupby(['品目コード', 'ライン'])['良品数'].sum().reset_index()
@@ -103,8 +103,51 @@ def parse_jisseki(df_j):
             result[code_j] = best_line
     return result
 
-# 起動時に選択中工場の実績データをCSVから復元
-_load_jisseki(factory_mode)
+# =====================================================================
+# 🌟 実績ライン学習辞書（品目コード→ライン）の永続化
+#   Streamlit Cloudではアプリ再起動（デプロイ・スリープ）でローカルCSVが
+#   消えるため、①累積マージで学習を蓄積、②辞書CSVをダウンロードして
+#   GitHubリポジトリに同梱すれば再起動後も恒久保持できる仕組みとする。
+# =====================================================================
+JISSEKI_DICT_FILES = {"本社": "jisseki_line_honsha.csv", "関西工場": "jisseki_line_kansai.csv"}
+
+def _load_line_dict(f_mode):
+    """学習済みライン辞書を読み込む（セッション→保存CSV→旧形式rawの順）"""
+    key = f"line_dict_{f_mode}"
+    if key in st.session_state:
+        return st.session_state[key]
+    d = {}
+    p = JISSEKI_DICT_FILES.get(f_mode)
+    if p and os.path.exists(p):
+        for enc in ('utf-8', 'cp932'):
+            try:
+                dfd = pd.read_csv(p, encoding=enc)
+                d = dict(zip(dfd['品目コード'].astype(str).str.strip(),
+                             dfd['ライン'].astype(str).str.strip()))
+                break
+            except: pass
+    if not d:
+        # 旧形式（生データCSV）からの移行
+        _raw = _load_jisseki(f_mode)
+        if _raw is not None:
+            try:
+                d = parse_jisseki(_raw)
+                _pfx_mig = 'H' if f_mode == "本社" else 'K'
+                d = {k: v for k, v in d.items() if str(k).startswith(_pfx_mig)}
+            except: pass
+    st.session_state[key] = d
+    return d
+
+def _save_line_dict(d, f_mode):
+    """学習辞書をセッションとCSVの両方へ保存"""
+    st.session_state[f"line_dict_{f_mode}"] = d
+    try:
+        pd.DataFrame({'品目コード': list(d.keys()), 'ライン': list(d.values())}).to_csv(
+            JISSEKI_DICT_FILES.get(f_mode), index=False, encoding='utf-8')
+    except: pass
+
+# 起動時に選択中工場の学習辞書を復元
+_load_line_dict(factory_mode)
 
 def _load_holidays():
     if 'holidays_data' in st.session_state:
@@ -644,18 +687,35 @@ if has_local_master or has_master_in_gekkan:
 else:
     st.sidebar.warning("⚠️ 構成表マスタが未登録です。")
 
-# 新規ファイルがアップロードされた場合は選択中工場のデータとして即時保存
-# （工場別に独立保存されるため、他工場の実績データは消えない）
+# 新規ファイルがアップロードされた場合は解析し、既存の学習辞書へ累積マージ
+# （上書きではなくマージなので、過去に学習した品目のライン情報は消えない）
 if file_jisseki is not None:
     try:
         safe_seek(file_jisseki)
         _df_j_new = pd.read_excel(file_jisseki, header=3)
-        _save_jisseki(_df_j_new, factory_mode)
+        _new_dict = parse_jisseki(_df_j_new)
+        # 選択中の工場に対応する品目コードのみ受け入れる（本社=H・関西=K）
+        # → 工場切替時にアップローダーへ残った他工場のファイルが混入するのを防ぐ
+        _pfx = 'H' if factory_mode == "本社" else 'K'
+        _new_dict = {k: v for k, v in _new_dict.items() if str(k).startswith(_pfx)}
+        if _new_dict:
+            _merged = dict(_load_line_dict(factory_mode))
+            _merged.update(_new_dict)
+            _save_line_dict(_merged, factory_mode)
     except: pass
 
-has_jisseki = (_jisseki_key(factory_mode) in st.session_state) or os.path.exists(JISSEKI_FILES.get(factory_mode, _LEGACY_JISSEKI_FILE))
-if has_jisseki:
-    st.sidebar.success("🟢 製造実績レポート: 読込済み (スタンバイOK)")
+_cur_line_dict = _load_line_dict(factory_mode)
+if _cur_line_dict:
+    st.sidebar.success(f"🟢 実績ライン学習（{factory_mode}）: {len(_cur_line_dict)}品目 保持中")
+    # 恒久保存用のダウンロードボタン（リポジトリ同梱でアプリ再起動後も維持できる）
+    _dict_csv = pd.DataFrame({'品目コード': list(_cur_line_dict.keys()),
+                              'ライン': list(_cur_line_dict.values())}).to_csv(index=False).encode('utf-8')
+    st.sidebar.download_button(
+        "💾 学習辞書CSVをダウンロード",
+        _dict_csv,
+        file_name=JISSEKI_DICT_FILES.get(factory_mode, "jisseki_line.csv"),
+        help="アプリの再起動（コード更新・スリープ）でサーバー上の保存は消えます。このCSVをダウンロードし、GitHubリポジトリのschedule_app.pyと同じ場所に置いてデプロイすると、再起動後も学習内容が恒久的に保持されます。"
+    )
 else:
     st.sidebar.info("ℹ️ 製造実績レポート未登録（ルールベースで動作）")
 
@@ -1135,16 +1195,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     else:
                         recipe_total_bags = df_master_combined.groupby('中身設計コード')['採用ベース数量'].sum().to_dict() if '中身設計コード' in df_master_combined.columns else {}
 
-                        jisseki_line_dict = {}
-
-                        # グローバルのparse_jisseki・_load_jissekiを使用（起動時に既に復元済み）
-                        _df_j_cached = _load_jisseki(factory_mode)
-                        if _df_j_cached is not None:
-                            try:
-                                jisseki_line_dict = parse_jisseki(_df_j_cached)
-                                st.sidebar.success(f"🟢 実績レポート適用済み ({len(jisseki_line_dict)}品目)")
-                            except Exception as e:
-                                st.sidebar.warning(f"⚠️ 実績レポート読込エラー: {e}")
+                        # 学習辞書（累積マージ済み）を使用
+                        jisseki_line_dict = dict(_load_line_dict(factory_mode))
 
                         KEYWORDS_4GO = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
                                         'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
@@ -1529,6 +1581,106 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     _summary.append((_m_num, _days_p, _ov_p, _p_end, _target_bd))
 
                 df_final_sorted = pd.concat(_df_frames, ignore_index=True) if _df_frames else pd.DataFrame()
+
+                # =====================================================================
+                # 🌟 天川月間製造計画書の反映（本社モードのみ）
+                #   MRP連携用にシート1（バッチ集計）へ数量を反映する。
+                #   タイムテーブル（シート2・3）は本社ライン用のため対象外。
+                # =====================================================================
+                if factory_mode == "本社":
+                    try:
+                        safe_seek(file_gekkan)
+                        _xl_tk = pd.ExcelFile(file_gekkan)
+                        _tk_sheets = [s for s in _xl_tk.sheet_names if '天川' in s and '計画' in s]
+                        if _tk_sheets:
+                            _df_tk = pd.read_excel(_xl_tk, sheet_name=_tk_sheets[0], header=None)
+                            # 見出し行（商品CD）の検出
+                            _tk_item_row = next((i for i in range(min(15, len(_df_tk))) if any(kw in [str(v).strip() for v in _df_tk.iloc[i].values] for kw in ['商品CD', '商品コード', '品目コード', '商品CODE'])), 2)
+                            # 月ラベルスキャン
+                            _tk_labels = []
+                            _tk_seen = set()
+                            for _r in range(0, _tk_item_row + 1):
+                                for _c in range(_df_tk.shape[1]):
+                                    if _c in _tk_seen: continue
+                                    _v = _df_tk.iloc[_r, _c]
+                                    if _v is not None:
+                                        _s = str(_v).strip()
+                                        _m = re.search(r'(\d{1,2})\s*月', _s)
+                                        if _m and not re.search(r'\d{1,2}\s*月\s*\d{1,2}\s*日', _s):
+                                            _mn = int(_m.group(1))
+                                            if 1 <= _mn <= 12:
+                                                _tk_labels.append((_c, _mn)); _tk_seen.add(_c)
+                            _tk_labels.sort(key=lambda x: x[0])
+                            _tk_dedup = []
+                            for _cp, _mn in _tk_labels:
+                                if _tk_dedup and _tk_dedup[-1][1] == _mn: continue
+                                _tk_dedup.append((_cp, _mn))
+                            _tk_labels = _tk_dedup
+                            # 見出し行（自体と1つ下）の値
+                            _tk_hdr_rows = [_tk_item_row] + ([_tk_item_row + 1] if _tk_item_row + 1 < len(_df_tk) else [])
+                            _tk_hdr_vals = {r: [str(v).strip() for v in _df_tk.iloc[r].values] for r in _tk_hdr_rows}
+                            # ロット列
+                            _tk_lot_col = None
+                            for _hr in _tk_hdr_rows:
+                                _tk_lot_col = next((c for c, t in enumerate(_tk_hdr_vals[_hr]) if 'ロット' in t or 'ﾛｯﾄ' in t), None)
+                                if _tk_lot_col is not None: break
+
+                            def _tk_find_block(mn):
+                                for i, (cp, m) in enumerate(_tk_labels):
+                                    if m == mn:
+                                        return cp, (_tk_labels[i+1][0] if i+1 < len(_tk_labels) else _df_tk.shape[1])
+                                return None, None
+
+                            def _tk_find_pa(bs, be):
+                                if bs is None: return None, None
+                                rng = list(range(bs, be))
+                                for _hr in _tk_hdr_rows:
+                                    vals = _tk_hdr_vals[_hr]
+                                    p = next((c for c in rng if c < len(vals) and '製造予定' in vals[c]), None)
+                                    a = next((c for c in rng if c < len(vals) and '製造実績' in vals[c]), None)
+                                    if p is not None and a is not None: return p, a
+                                return None, None
+
+                            _tk_data = _df_tk.iloc[_tk_item_row + 1:]
+                            _tk_rows = []
+                            for _m_num_tk in months_to_plan:
+                                _bs, _be = _tk_find_block(_m_num_tk)
+                                _p_c, _a_c = _tk_find_pa(_bs, _be)
+                                if _p_c is None: continue
+                                for _ri in range(len(_tk_data)):
+                                    _code_tk = str(_tk_data.iloc[_ri, 0]).strip()
+                                    if not re.match(r'^[A-Za-z]\d', _code_tk): continue
+                                    _pv = pd.to_numeric(_tk_data.iloc[_ri, _p_c], errors='coerce')
+                                    _av = pd.to_numeric(_tk_data.iloc[_ri, _a_c], errors='coerce')
+                                    _pv = 0 if pd.isna(_pv) else _pv
+                                    _av = 0 if pd.isna(_av) else _av
+                                    _zan_tk = max(0, _pv - _av)
+                                    if _zan_tk <= 0: continue
+                                    _name_tk = str(_tk_data.iloc[_ri, 1]).strip()
+                                    _lot_tk = 0.0
+                                    if _tk_lot_col is not None:
+                                        _lv_tk = pd.to_numeric(_tk_data.iloc[_ri, _tk_lot_col], errors='coerce')
+                                        if not pd.isna(_lv_tk) and _lv_tk > 0: _lot_tk = float(_lv_tk)
+                                    _bags_tk = int(math.ceil(_zan_tk / _lot_tk) * _lot_tk) if _lot_tk > 0 else int(_zan_tk)
+                                    _vol_tk = extract_volume_safe(_name_tk)
+                                    if is_kg_product(_name_tk):
+                                        _m3_tk = round(_bags_tk * get_kg_weight(_name_tk), 1)
+                                    else:
+                                        _m3_tk = round(_bags_tk * max(_vol_tk, 1) / 900.0, 1)
+                                    _tk_rows.append({
+                                        '対象月度': _m_num_tk, '品目コード': _code_tk, '品目名': _name_tk,
+                                        '製造ライン': '天川', '中身設計コード': extract_content_code(_code_tk),
+                                        '現在の在庫': np.nan, '安全在庫数': np.nan, '安全割れ不足数': 0.0,
+                                        '今月の計画残数': _zan_tk, '生産ロット': _lot_tk,
+                                        '製造決定_m3': _m3_tk, '計画製造袋数': _bags_tk,
+                                        '製造理由': '天川計画', '容量_L': _vol_tk,
+                                    })
+                            if _tk_rows:
+                                df_final_sorted = pd.concat([df_final_sorted, pd.DataFrame(_tk_rows)], ignore_index=True)
+                                st.info(f"⛰️ 天川月間製造計画書（{_tk_sheets[0]}）: {len(_tk_rows)}件（品目×月度）をバッチ集計シートへ反映しました。タイムテーブルは対象外です。")
+                    except Exception as _e_tk:
+                        st.warning(f"⚠️ 天川計画書の読込に失敗しました: {_e_tk}")
+
                 if df_final_sorted.empty:
                     st.warning("計画対象となる品目がありません。")
                     st.stop()

@@ -493,7 +493,7 @@ def parse_bag_size(val):
     return (w, p, extra)
 
 def bag_size_diff(a, b):
-    if not a or not b:
+    if not isinstance(a, tuple) or not isinstance(b, tuple):
         return None
     return sum(abs(x - y) for x, y in zip(a, b))
 
@@ -514,8 +514,10 @@ def sort_jobs_by_size_proximity(df_line):
         last_vol = last_job['容量_L']
         last_core = last_job['コア名称']
         last_bag = last_job.get('袋サイズ')
+        if not isinstance(last_bag, tuple):
+            last_bag = None
         # 袋サイズ（幅×ピッチ）が完全一致する品目を最優先で連続製造し、資材（フィルム）交換を減らす
-        same_bag_candidates = [j for j in unprocessed if last_bag and j.get('袋サイズ') == last_bag]
+        same_bag_candidates = [j for j in unprocessed if last_bag and isinstance(j.get('袋サイズ'), tuple) and j.get('袋サイズ') == last_bag]
         similar_candidates = [j for j in unprocessed if is_similar_product(last_core, j['コア名称'])]
         if same_bag_candidates:
             same_bag_candidates.sort(key=lambda x: (abs(x['容量_L'] - last_vol), x['グループ緊急度']))
@@ -1495,7 +1497,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                     df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                     df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
-                    df_final['袋サイズ'] = df_final['品目コード'].astype(str).str.strip().map(item_bagsize_dict)
+                    df_final['袋サイズ'] = df_final['品目コード'].astype(str).str.strip().apply(lambda c: item_bagsize_dict.get(c))
 
                     df_final['_月順'] = df_final['対象月度'].map(lambda m: _month_order.get(m, 99))
                     df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', '_月順', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, True, False]).copy()

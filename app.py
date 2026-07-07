@@ -2189,4 +2189,43 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 out_io = io.BytesIO(); wb.save(out_io); out_io.seek(0)
                 _fname_period = f"{target_month}度〜10月度(期末)" if plan_to_yearend else f"{target_month}度"
                 st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{_fname_period}_スケジュール表.xlsx")
+
+                # =====================================================================
+                # 🌟 GEN製造オーダーインポート用CSVの生成
+                #   オーダー番号・製番はGEN側の自動採番に委ねるため空欄とし、
+                #   入出庫ロケーションは工場固定コード（本社=01・関西工場=12）を付与する。
+                #   製造順番は同日・同ラインの実行順（t_start順）で1から採番する。
+                # =====================================================================
+                _gen_loc = "01" if factory_mode == "本社" else "12"
+                _gen_rows = []
+                _gen_seq_ctr = {}
+                for j in sorted(full_sched, key=lambda r: (r['製造日'], r['製造ライン'], r['t_start'])):
+                    _seq_key = (j['製造日'], j['製造ライン'])
+                    _gen_seq_ctr[_seq_key] = _gen_seq_ctr.get(_seq_key, 0) + 1
+                    _gen_rows.append({
+                        'オーダー番号': '',
+                        '入庫ロケーション': _gen_loc,
+                        '出庫ロケーション': _gen_loc,
+                        '製番': '',
+                        '製造開始日': j['製造日'],
+                        '製造納期': j['製造日'],
+                        '品目': j['品目コード'],
+                        '数量': j['指示数量(袋)'],
+                        '製造指示備考': j['備考'],
+                        '設備 *': j['製造ライン'],
+                        '製造順番 *': _gen_seq_ctr[_seq_key],
+                        '表示数量 *': j['指示数量(袋)'],
+                    })
+                _df_gen = pd.DataFrame(_gen_rows, columns=[
+                    'オーダー番号', '入庫ロケーション', '出庫ロケーション', '製番', '製造開始日', '製造納期',
+                    '品目', '数量', '製造指示備考', '設備 *', '製造順番 *', '表示数量 *'
+                ])
+                _gen_csv_bytes = _df_gen.to_csv(index=False).encode('cp932', errors='replace')
+                st.download_button(
+                    "📤 GENインポート用CSVをダウンロード",
+                    _gen_csv_bytes,
+                    f"ManufacturingOrder_{factory_mode}_{_fname_period}.csv",
+                    mime="text/csv",
+                    help="設備コード・品目コードがGEN側マスタの表記と完全一致している前提です。ロケーションコードは本社=01・関西工場=12固定で出力しています。"
+                )
             except Exception as e: st.error(f"計算実行エラー: {e}")

@@ -241,6 +241,109 @@ if _saved_holidays:
 
 holidays_input = list(_saved_holidays)
 
+# =====================================================================
+# 🌟 ライン停止スケジュール（特定ライン・特定日時のみを意図的に停止）
+#   工場休業日（全ライン停止）とは別に、特定の号機だけを日付・時間帯を
+#   指定して止められるようにする。停止中はそのラインの稼働可能時間から
+#   停止分を差し引き、対象ジョブは既存の応援・後ろ倒しロジックに委ねる。
+# =====================================================================
+LINE_STOP_FILES = {"本社": "line_stops_honsha.csv", "関西工場": "line_stops_kansai.csv"}
+
+def _stoppable_lines(f_mode):
+    return ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機"] if f_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機"]
+
+def _load_line_stops(f_mode):
+    key = f"line_stops_{f_mode}"
+    if key in st.session_state:
+        return st.session_state[key]
+    rows = []
+    p = LINE_STOP_FILES.get(f_mode)
+    if p and os.path.exists(p):
+        try:
+            df_s = pd.read_csv(p, encoding='utf-8')
+            for _, r in df_s.iterrows():
+                rows.append({
+                    'line': str(r['line']),
+                    'date': datetime.datetime.strptime(str(r['date']), "%Y-%m-%d").date(),
+                    'start': str(r['start']),
+                    'end': str(r['end']),
+                })
+        except: pass
+    st.session_state[key] = rows
+    return rows
+
+def _save_line_stops(rows, f_mode):
+    st.session_state[f"line_stops_{f_mode}"] = rows
+    try:
+        pd.DataFrame([{'line': r['line'], 'date': r['date'].strftime("%Y-%m-%d"), 'start': r['start'], 'end': r['end']} for r in rows]).to_csv(
+            LINE_STOP_FILES.get(f_mode), index=False, encoding='utf-8')
+    except: pass
+
+_line_stops = _load_line_stops(factory_mode)
+
+st.sidebar.markdown("### 🛑 ラインの計画停止（日時指定）")
+st.sidebar.caption("特定の号機だけを、指定した日付・時間帯だけ意図的に止めます（設備メンテナンス等）。停止中の製造分は自動で他ラインへの応援または後ろ倒しに回されます。")
+
+_ls_c1, _ls_c2 = st.sidebar.columns(2)
+with _ls_c1:
+    _ls_line = st.selectbox("対象ライン", _stoppable_lines(factory_mode), key="ls_line_sel")
+    _ls_date = st.date_input("停止日", default_start, key="ls_date_sel")
+with _ls_c2:
+    _ls_start = st.time_input("開始時刻", datetime.time(8, 0), key="ls_start_sel", step=600)
+    _ls_end = st.time_input("終了時刻", datetime.time(17, 0), key="ls_end_sel", step=600)
+
+if st.sidebar.button("➕ この停止予定を登録", key="ls_add"):
+    if _ls_end <= _ls_start:
+        st.sidebar.error("終了時刻は開始時刻より後にしてください。")
+    else:
+        _line_stops.append({'line': _ls_line, 'date': _ls_date, 'start': _ls_start.strftime("%H:%M"), 'end': _ls_end.strftime("%H:%M")})
+        _save_line_stops(_line_stops, factory_mode)
+        st.rerun()
+
+if _line_stops:
+    _w_kanji_list2 = ["月", "火", "水", "木", "金", "土", "日"]
+    st.sidebar.caption(f"📋 登録済み停止予定 {len(_line_stops)}件")
+    for _si, _s in enumerate(sorted(_line_stops, key=lambda r: (r['date'], r['line']))):
+        _lbl = f"{_s['line']} / {_s['date'].month}/{_s['date'].day}({_w_kanji_list2[_s['date'].weekday()]}) {_s['start']}〜{_s['end']}"
+        _sc1, _sc2 = st.sidebar.columns([4, 1])
+        _sc1.markdown(f"<div style='font-size:12px;padding-top:6px;'>{_lbl}</div>", unsafe_allow_html=True)
+        if _sc2.button("🗑️", key=f"ls_del_{_si}"):
+            _line_stops.remove(_s)
+            _save_line_stops(_line_stops, factory_mode)
+            st.rerun()
+
+# 就業タイムテーブル（8:00始業、休憩10:00-10:10/12:00-13:00/15:00-15:10）を基準に、
+# 時刻を「始業からの実働経過分」に変換する（run_sim内のcap_limitと同一の分体系）
+_SHIFT_SEGMENTS = [(8 * 60, 10 * 60), (10 * 60 + 10, 12 * 60), (13 * 60, 15 * 60), (15 * 60 + 10, 24 * 60)]
+
+def _clock_to_elapsed(t):
+    cm = t.hour * 60 + t.minute
+    elapsed = 0.0
+    for s, e in _SHIFT_SEGMENTS:
+        if cm <= s:
+            break
+        if cm < e:
+            elapsed += cm - s
+            break
+        else:
+            elapsed += e - s
+    return elapsed
+
+def get_line_stop_minutes(line, d, f_mode):
+    """指定ライン・指定日に登録された停止時間帯の合計「実働分（休憩除く）」を返す"""
+    total = 0.0
+    for r in _load_line_stops(f_mode):
+        if r['line'] == line and r['date'] == d:
+            try:
+                st_t = datetime.datetime.strptime(r['start'], "%H:%M").time()
+                ed_t = datetime.datetime.strptime(r['end'], "%H:%M").time()
+            except:
+                continue
+            e_s, e_e = _clock_to_elapsed(st_t), _clock_to_elapsed(ed_t)
+            if e_e > e_s:
+                total += e_e - e_s
+    return total
+
 def _get_month_end(month_label, base_today):
     m = int(month_label.replace("月", ""))
     y = base_today.year
@@ -1701,12 +1804,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             # 7月・8月・12月: 1時間短縮、3月・4月: 1時間延長（カレンダー月基準）
                             _base_cap = 400.0 if loop_d.weekday() == 4 else 430.0
                             _month_adj = -60.0 if loop_d.month in (7, 8, 12) else (60.0 if loop_d.month in (3, 4) else 0.0)
-                            cap_limit = _base_cap + _month_adj + ov_mins
+                            cap_limit_day = _base_cap + _month_adj + ov_mins
                             w_kanji = ["月", "火", "水", "木", "金", "土", "日"][loop_d.weekday()]
                             d_str_disp = loop_d.strftime("%Y/%m/%d")
 
                             for line in run_today:
                                 spent = 0.0; p_rec = None; p_vol = None
+                                cap_limit = max(0.0, cap_limit_day - get_line_stop_minutes(line, loop_d, factory_mode))
+                                if cap_limit <= 0: continue
 
                                 # その日まだ何も製造していない（＝機械が清掃済みの状態の）タイミングでのみ、
                                 # ①原料・袋の在庫がある品目を優先し、②その中で特殊清掃が必要な品目を最優先で

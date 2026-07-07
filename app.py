@@ -625,6 +625,10 @@ LINE_SPEED_PRIORITY = {
 _KEYWORDS_4GO = ['ピートモス', 'くん炭', 'バーミキュライト', 'パーライト',
                  'ﾋﾟｰﾄﾓｽ', 'ﾊﾞｰﾐｷｭﾗｲﾄ', 'ﾊﾟｰﾗｲﾄ']
 
+# 特殊清掃が必要な品目キーワード（各稼働日の最初に製造することで、清掃を1日1回で済ませる）
+SPECIAL_CLEANING_KEYWORDS = ['種まき培土', 'ピートモス', 'オーガニック', '軽石', '鉢底石',
+                              'ﾋﾟｰﾄﾓｽ', 'ｵｰｶﾞﾆｯｸ']
+
 # 本社ライン固定商品一覧（ライン固定一覧20260706.xlsxのD列「指定機械」より・54品目）
 HONSHA_FIXED_LINE = {
     'H0120620': '2号機', 'H0120630': '2号機', 'H0220230': '2号機', 'H0500110': '2号機',
@@ -1596,6 +1600,21 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                             for line in run_today:
                                 spent = 0.0; p_rec = None; p_vol = None
+
+                                # 特殊清掃が必要な品目は、その日まだ何も製造していない（＝機械が清掃済みの状態の）
+                                # タイミングでのみ繰り上げて先頭に持ってくる。前日から継続中のジョブは中断しない。
+                                _cur = cur_idx[line]
+                                if _cur < len(queues[line]) and queues[line][_cur]['rem'] == queues[line][_cur]['計画製造袋数']:
+                                    for _scan_idx in range(_cur, len(queues[line])):
+                                        _cand = queues[line][_scan_idx]
+                                        if _cand['rem'] <= 0:
+                                            continue
+                                        if _month_order.get(_cand.get('対象月度', _first_month), 0) > _month_order.get(loop_d.month, 99):
+                                            break
+                                        if any(k in str(_cand.get('品目名', '')) for k in SPECIAL_CLEANING_KEYWORDS):
+                                            if _scan_idx != _cur:
+                                                queues[line].insert(_cur, queues[line].pop(_scan_idx))
+                                            break
 
                                 day_confirmed = [cj for cj in confirmed_jobs if cj['日付'] == loop_d and cj['ライン'] == line]
                                 for cj in day_confirmed:

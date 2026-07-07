@@ -303,6 +303,14 @@ file_itemmaster = st.sidebar.file_uploader(
     "⑤ [任意] 品目マスタ (袋サイズ切り替えルール用・CSV)", type=["csv", "xlsx"],
     help="「幅×ピッチ（㎜）」列を使い、同じ容量（例:25L）でも実際の袋型枠サイズが近い品目を連続製造するよう切り替え順序を最適化します。"
 )
+file_bag_zai = st.sidebar.file_uploader(
+    "⑥ [任意] 袋 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"],
+    help="袋の在庫が無い日は、その品目の製造を在庫が回復する日まで自動的に後ろ倒しします。"
+)
+file_raw_zai = st.sidebar.file_uploader(
+    "⑦ [任意] 原料 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"],
+    help="原料の在庫が無い日は、その品目の製造を在庫が回復する日まで自動的に後ろ倒しします。"
+)
 
 st.sidebar.markdown("---")
 consider_iko = st.sidebar.checkbox(
@@ -401,6 +409,52 @@ def load_excel_sheets_merged(file, keywords, exclude_keywords=None):
     del xl
     gc.collect()
     return base_df
+
+def parse_stock_trend_file(file):
+    """在庫推移リストと同形式（品目コード／種類[入・出・在]／日付列）のファイルから
+    {(品目コード, 日付): 在庫数} を作る。原料・袋の在庫在庫連動ルール用。"""
+    if file is None:
+        return {}
+    try:
+        raw = load_excel_sheets_merged(file, ["在庫推移リスト", "在庫推移"])
+    except Exception:
+        return {}
+    if raw is None or raw.empty:
+        return {}
+    header_idx = next((i for i in range(len(raw)) if any(kw in [str(v).strip() for v in raw.iloc[i].values] for kw in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE'])), None)
+    if header_idx is None:
+        return {}
+    raw_headers = [str(h).strip() for h in raw.iloc[header_idx].values]
+    standard_headers = ['品目コード' if h in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE'] else ('種類' if h in ['種類', '区分'] else h) for h in raw_headers]
+    df_fixed = raw.iloc[header_idx + 1:].copy()
+    df_fixed.columns = standard_headers
+    df_fixed['品目コード'] = df_fixed['品目コード'].ffill().astype(str).str.strip()
+    if '種類' not in df_fixed.columns:
+        return {}
+    df_zai_rows = df_fixed[df_fixed['種類'] == '在'].copy()
+
+    date_col_pattern = re.compile(r'^\d{1,2}[/\-]\d{1,2}\(.\)$')
+    date_columns = [c for c in df_zai_rows.columns if date_col_pattern.match(str(c).strip())]
+    today_for_parse = datetime.date.today()
+    stock_dict = {}
+    for c in date_columns:
+        m_dt = re.match(r'^(\d{1,2})[/\-](\d{1,2})\(', str(c).strip())
+        if not m_dt:
+            continue
+        mo, da = int(m_dt.group(1)), int(m_dt.group(2))
+        y = today_for_parse.year
+        if mo < today_for_parse.month - 6:
+            y += 1
+        try:
+            d_obj = datetime.date(y, mo, da)
+        except ValueError:
+            continue
+        vals = pd.to_numeric(df_zai_rows[c], errors='coerce')
+        for code, v in zip(df_zai_rows['品目コード'], vals):
+            if pd.isna(v):
+                continue
+            stock_dict[(str(code).strip(), d_obj)] = float(v)
+    return stock_dict
 
 def clean_bom_master(df_raw_bom):
     if df_raw_bom is None or df_raw_bom.empty: return None
@@ -901,6 +955,59 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             else:
                                 if existing is None:
                                     bom_lookup_dict[pv_clean] = cv
+
+                # --- 原料・袋の在庫連動ルール用: BOM構成表から品目→袋コード／配合→原料コードを展開 ---
+                # BomMasterは「製造品目→(配合コード, 袋コード)」「配合コード→原料コード群(員数=構成比)」の
+                # 2階層構造になっている（員数列で判別。子品目コードそのものは名寄せ不要で厳密一致）。
+                bom_children_dict = {}
+                if not df_bom.empty:
+                    q_col = next((c for c in df_bom.columns if c in ['員数', '数量']), None)
+                    for _, r in df_bom.iterrows():
+                        pv_raw = str(r[p_col]).strip()
+                        cv_raw = str(r[c_col]).strip()
+                        if '.' in pv_raw: pv_raw = pv_raw.split('.')[0]
+                        if '.' in cv_raw: cv_raw = cv_raw.split('.')[0]
+                        qty = None
+                        if q_col is not None:
+                            try: qty = float(r[q_col])
+                            except (TypeError, ValueError): qty = None
+                        if pv_raw and cv_raw:
+                            bom_children_dict.setdefault(pv_raw, []).append((cv_raw, qty))
+
+                item_resource_dict = {}
+                for _parent, _children in bom_children_dict.items():
+                    if _parent.startswith(('BK', 'BH')):
+                        continue  # 配合コード自身は原料展開の親としてのみ参照する
+                    _recipe_child = next((c for c, _q in _children if c.startswith(('BK', 'BH'))), None)
+                    _bag_code = next((c for c, _q in _children if not c.startswith(('BK', 'BH'))), None)
+                    _raw_codes = []
+                    if _recipe_child and _recipe_child in bom_children_dict:
+                        _raw_codes = [c for c, q in bom_children_dict[_recipe_child] if q is None or q > 0]
+                    if _bag_code or _raw_codes:
+                        item_resource_dict[_parent] = {'bag': _bag_code, 'raw': _raw_codes}
+
+                # --- 原料・袋の在庫推移リスト読み込み（任意） ---
+                bag_stock_dict = parse_stock_trend_file(file_bag_zai)
+                raw_stock_dict = parse_stock_trend_file(file_raw_zai)
+                if bag_stock_dict or raw_stock_dict:
+                    st.caption(f"📉 在庫連動ルール: 袋在庫 {len(bag_stock_dict)}件 / 原料在庫 {len(raw_stock_dict)}件 を読み込み、在庫切れ日の製造を自動で後ろ倒しします。")
+
+                def job_material_ready(job, date_obj):
+                    """指定日に、この品目に必要な袋・原料の在庫が確保できているか。
+                    在庫推移データが無い品目／原料はチェック対象外（従来通り制約なしで製造可）。"""
+                    res = item_resource_dict.get(str(job.get('品目コード', '')).strip())
+                    if not res:
+                        return True
+                    bag_code = res.get('bag')
+                    if bag_code:
+                        v = bag_stock_dict.get((bag_code, date_obj))
+                        if v is not None and v <= 0:
+                            return False
+                    for raw_code in res.get('raw', []):
+                        v = raw_stock_dict.get((raw_code, date_obj))
+                        if v is not None and v <= 0:
+                            return False
+                    return True
 
                 # --- 品目マスタ（袋サイズ切り替えルール用）読み込み ---
                 # 優先順位: ①手動アップロード(明示的な上書き) → ②MRPアプリと共有のGitHubリポジトリから自動取得
@@ -1601,20 +1708,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             for line in run_today:
                                 spent = 0.0; p_rec = None; p_vol = None
 
-                                # 特殊清掃が必要な品目は、その日まだ何も製造していない（＝機械が清掃済みの状態の）
-                                # タイミングでのみ繰り上げて先頭に持ってくる。前日から継続中のジョブは中断しない。
+                                # その日まだ何も製造していない（＝機械が清掃済みの状態の）タイミングでのみ、
+                                # ①原料・袋の在庫がある品目を優先し、②その中で特殊清掃が必要な品目を最優先で
+                                # 繰り上げる。前日から継続中のジョブは中断せず最後まで作り切る。
                                 _cur = cur_idx[line]
                                 if _cur < len(queues[line]) and queues[line][_cur]['rem'] == queues[line][_cur]['計画製造袋数']:
+                                    _candidate_idxs = []
                                     for _scan_idx in range(_cur, len(queues[line])):
                                         _cand = queues[line][_scan_idx]
                                         if _cand['rem'] <= 0:
                                             continue
                                         if _month_order.get(_cand.get('対象月度', _first_month), 0) > _month_order.get(loop_d.month, 99):
                                             break
-                                        if any(k in str(_cand.get('品目名', '')) for k in SPECIAL_CLEANING_KEYWORDS):
-                                            if _scan_idx != _cur:
-                                                queues[line].insert(_cur, queues[line].pop(_scan_idx))
-                                            break
+                                        _candidate_idxs.append(_scan_idx)
+                                    _ready_idxs = [i for i in _candidate_idxs if job_material_ready(queues[line][i], loop_d)]
+                                    _pool = _ready_idxs if _ready_idxs else _candidate_idxs
+                                    _pick = next((i for i in _pool if any(k in str(queues[line][i].get('品目名', '')) for k in SPECIAL_CLEANING_KEYWORDS)), _pool[0] if _pool else None)
+                                    if _pick is not None and _pick != _cur:
+                                        queues[line].insert(_cur, queues[line].pop(_pick))
 
                                 day_confirmed = [cj for cj in confirmed_jobs if cj['日付'] == loop_d and cj['ライン'] == line]
                                 for cj in day_confirmed:
@@ -1631,6 +1742,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         job = queues[line][idx]
                                         # 同月度内計画: 対象月度がまだ来ていないジョブは当日処理しない
                                         if _month_order.get(job.get('対象月度', _first_month), 0) > _month_order.get(loop_d.month, 99):
+                                            break
+                                        # 原料・袋の在庫が無い日は、未着手のジョブに限り製造を後ろ倒しする
+                                        # （前日から継続中のジョブは中断せず作り切る）
+                                        if job['rem'] == job['計画製造袋数'] and not job_material_ready(job, loop_d):
                                             break
                                         sw = 5.0 if spent > 0 and p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
                                         avail = cap_limit - spent - sw

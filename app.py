@@ -8,6 +8,7 @@ import os
 import copy
 import datetime
 import gc
+import requests
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
@@ -298,6 +299,10 @@ else:
 
 file_bom = st.sidebar.file_uploader("③ [任意] 新しいBOM構成表マスタ (ExcelまたはCSV)", type=["xlsx", "csv"])
 file_jisseki = st.sidebar.file_uploader("④ [任意] 製造実績レポート (Excel形式: .xlsx)", type=["xlsx"])
+file_itemmaster = st.sidebar.file_uploader(
+    "⑤ [任意] 品目マスタ (袋サイズ切り替えルール用・CSV)", type=["csv", "xlsx"],
+    help="「幅×ピッチ（㎜）」列を使い、同じ容量（例:25L）でも実際の袋型枠サイズが近い品目を連続製造するよう切り替え順序を最適化します。"
+)
 
 st.sidebar.markdown("---")
 consider_iko = st.sidebar.checkbox(
@@ -330,6 +335,39 @@ st.sidebar.info(
 
 def safe_seek(f):
     if hasattr(f, 'seek'): f.seek(0)
+
+def fetch_github_file_bytes(path):
+    """MRPアプリ（発注リスケ提案ツール）と共有しているGitHubリポジトリからファイルを取得する。
+    st.secrets["github"]["token"]/["repo"] は mrp_link.py の自動連携と同じ設定を流用する。"""
+    gh = st.secrets.get("github", {})
+    token, repo = gh.get("token"), gh.get("repo")
+    if not token or not repo:
+        return None
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.raw",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code == 200:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+def read_item_master_bytes(raw_bytes, filename="ItemMaster.csv"):
+    """品目マスタのバイト列をDataFrameに変換する。MRPアプリのloaders/item_master.pyと同じ
+    想定フォーマット（CP932想定・cp932→utf-8-sig→utf-8の順で試行）に合わせる。"""
+    if filename.lower().endswith(('.xlsx', '.xls')):
+        return pd.read_excel(io.BytesIO(raw_bytes))
+    for enc in ('cp932', 'utf-8-sig', 'utf-8'):
+        try:
+            return pd.read_csv(io.BytesIO(raw_bytes), encoding=enc)
+        except Exception:
+            continue
+    return None
 
 def load_excel_sheets_merged(file, keywords, exclude_keywords=None):
     safe_seek(file)
@@ -427,6 +465,38 @@ def is_similar_product(core_a, core_b):
         return False
     return core_a == core_b or core_a in core_b or core_b in core_a
 
+def parse_bag_size(val):
+    """品目マスタの「幅×ピッチ（㎜）」列を (幅, ピッチ, 追加値) のタプルに正規化する。
+    同じ容量_L（例:25L）でも実際の袋型枠は微妙に異なる（例:450x650 と 460x650）ため、
+    容量とは別に実際の袋サイズで切り替え順序を判定するのに使う。"""
+    s = str(val).strip()
+    if not s or s.lower() == 'nan':
+        return None
+    s = s.translate(str.maketrans({'ｘ': 'x', 'Ｘ': 'x', '×': 'x', 'X': 'x'}))
+    parts = s.split('x')
+    if len(parts) < 2:
+        return None
+    def _num(token):
+        m = re.search(r'\d+(?:\.\d+)?', token)
+        return float(m.group()) if m else None
+    w = _num(parts[0])
+    p_token = parts[1]
+    extra = 0.0
+    if '+' in p_token:
+        p_str, extra_str = p_token.split('+', 1)
+        p = _num(p_str)
+        extra = _num(extra_str) or 0.0
+    else:
+        p = _num(p_token)
+    if w is None or p is None:
+        return None
+    return (w, p, extra)
+
+def bag_size_diff(a, b):
+    if not a or not b:
+        return None
+    return sum(abs(x - y) for x, y in zip(a, b))
+
 def sort_jobs_by_size_proximity(df_line):
     unprocessed = df_line.to_dict('records')
     if not unprocessed: return []
@@ -443,17 +513,21 @@ def sort_jobs_by_size_proximity(df_line):
         last_job = processed[-1]
         last_vol = last_job['容量_L']
         last_core = last_job['コア名称']
+        last_bag = last_job.get('袋サイズ')
+        # 袋サイズ（幅×ピッチ）が完全一致する品目を最優先で連続製造し、資材（フィルム）交換を減らす
+        same_bag_candidates = [j for j in unprocessed if last_bag and j.get('袋サイズ') == last_bag]
         similar_candidates = [j for j in unprocessed if is_similar_product(last_core, j['コア名称'])]
-        if similar_candidates:
+        if same_bag_candidates:
+            same_bag_candidates.sort(key=lambda x: (abs(x['容量_L'] - last_vol), x['グループ緊急度']))
+            best_idx = unprocessed.index(same_bag_candidates[0])
+        elif similar_candidates:
             similar_candidates.sort(key=lambda x: (abs(x['容量_L'] - last_vol), x['グループ緊急度']))
             best_idx = unprocessed.index(similar_candidates[0])
         else:
-            min_diff = float('inf'); best_idx = -1
-            for idx, j in enumerate(unprocessed):
-                diff = abs(j['容量_L'] - last_vol)
-                if diff < min_diff: min_diff = diff; best_idx = idx
-                elif diff == min_diff:
-                    if j['グループ緊急度'] < unprocessed[best_idx]['グループ緊急度']: best_idx = idx
+            def _rank(j):
+                bd = bag_size_diff(last_bag, j.get('袋サイズ'))
+                return (bd if bd is not None else float('inf'), abs(j['容量_L'] - last_vol), j['グループ緊急度'])
+            best_idx = min(range(len(unprocessed)), key=lambda idx: _rank(unprocessed[idx]))
         next_recipe = unprocessed[best_idx]['中身設計コード']
         same_recipe_jobs = [j for j in unprocessed if j['中身設計コード'] == next_recipe]
         same_recipe_jobs.sort(key=lambda x: x['容量_L'], reverse=True)
@@ -821,6 +895,57 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             else:
                                 if existing is None:
                                     bom_lookup_dict[pv_clean] = cv
+
+                # --- 品目マスタ（袋サイズ切り替えルール用）読み込み ---
+                # 優先順位: ①手動アップロード(明示的な上書き) → ②MRPアプリと共有のGitHubリポジトリから自動取得
+                #           → ③セッションキャッシュ → ④ローカルキャッシュ
+                df_itemmaster = None
+                itemmaster_source = None
+                if file_itemmaster is not None:
+                    safe_seek(file_itemmaster)
+                    if file_itemmaster.name.endswith('.csv'):
+                        try: df_itemmaster = pd.read_csv(file_itemmaster, encoding='utf-8')
+                        except:
+                            safe_seek(file_itemmaster)
+                            df_itemmaster = pd.read_csv(file_itemmaster, encoding='cp932')
+                    else:
+                        df_itemmaster = pd.read_excel(file_itemmaster)
+                    itemmaster_source = "手動アップロード"
+                else:
+                    _im_bytes = fetch_github_file_bytes("data/ItemMaster.csv")
+                    if _im_bytes:
+                        try:
+                            df_itemmaster = read_item_master_bytes(_im_bytes, "ItemMaster.csv")
+                            itemmaster_source = "MRPアプリ共有マスタ（GitHub自動取得）"
+                        except Exception:
+                            df_itemmaster = None
+                    if df_itemmaster is None and 'itemmaster_data' in st.session_state:
+                        df_itemmaster = st.session_state['itemmaster_data']
+                        itemmaster_source = "セッションキャッシュ"
+                    if df_itemmaster is None and os.path.exists("itemmaster_local.csv"):
+                        try: df_itemmaster = pd.read_csv("itemmaster_local.csv", encoding='utf-8')
+                        except: df_itemmaster = pd.read_csv("itemmaster_local.csv", encoding='cp932')
+                        itemmaster_source = "ローカルキャッシュ"
+
+                if df_itemmaster is not None:
+                    try:
+                        df_itemmaster.to_csv("itemmaster_local.csv", index=False, encoding='utf-8')
+                        st.session_state['itemmaster_data'] = df_itemmaster
+                    except: pass
+                    st.caption(f"📦 品目マスタ（袋サイズ判定用）: {itemmaster_source} — {len(df_itemmaster)}件")
+                else:
+                    st.caption("ℹ️ 品目マスタ未取得のため、袋サイズ切り替えルールは無効です（容量ベースの従来ロジックで動作）。")
+
+                item_bagsize_dict = {}
+                if df_itemmaster is not None and not df_itemmaster.empty:
+                    im_code_col = next((c for c in df_itemmaster.columns if c in ['品目コード', '商品コード', '商品CODE']), None)
+                    im_size_col = next((c for c in df_itemmaster.columns if '幅' in str(c) and 'ピッチ' in str(c)), None)
+                    if im_code_col and im_size_col:
+                        for _, r in df_itemmaster.iterrows():
+                            code = str(r[im_code_col]).strip()
+                            bag = parse_bag_size(r[im_size_col])
+                            if code and bag:
+                                item_bagsize_dict[code] = bag
 
                 def extract_content_code(item_code):
                     item_str = str(item_code).strip()
@@ -1370,6 +1495,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     df_final['製造所要時間_分'] = df_final.apply(lambda r: (r['計画製造袋数'] / get_sp(r['製造ライン'], r['容量_L'], factory_mode, r['品目コード'])) * 60 if r['計画製造袋数'] > 0 else 0.0, axis=1)
                     df_final['緊急度'] = df_final.apply(lambda r: (r['現在の在庫'] - r['安全在庫数']) if not pd.isna(r['現在の在庫']) else 500, axis=1)
                     df_final['グループ緊急度'] = df_final['中身設計コード'].map(df_final.groupby('中身設計コード')['緊急度'].min().to_dict())
+                    df_final['袋サイズ'] = df_final['品目コード'].astype(str).str.strip().map(item_bagsize_dict)
 
                     df_final['_月順'] = df_final['対象月度'].map(lambda m: _month_order.get(m, 99))
                     df_final_sorted = df_final[df_final['計画製造袋数'] > 0].sort_values(by=['製造ライン', '_月順', 'グループ緊急度', '中身設計コード', '容量_L'], ascending=[True, True, True, True, False]).copy()

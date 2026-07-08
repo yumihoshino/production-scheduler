@@ -9,6 +9,8 @@ import copy
 import datetime
 import gc
 import requests
+import base64
+import hashlib
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
@@ -424,7 +426,7 @@ file_raw_zai = st.sidebar.file_uploader(
 file_ext_zai = st.sidebar.file_uploader(
     "⑧ [任意] 外部置き場 在庫推移リスト (Excel形式: .xlsx・複数可)", type=["xlsx"],
     accept_multiple_files=True,
-    help="外部置き場ロケーションでエクスポートした在庫推移リスト（複数ロケーション込みでも可）です。拠点（01本社/12関西工場）で安全在庫割れでも、同じ拠点に紐づく外部置き場に在庫があれば「移動すれば製造・出荷可能」と判定して不足数から差し引き、在庫移動指示リストを作成します。置き場と拠点の対応は、MRPアプリに登録済みのロケーションマスタ（「対応拠点」列）の最新データを自動取得して使用します。"
+    help="外部置き場ロケーションでエクスポートした在庫推移リスト（複数ロケーション込みでも可）です。拠点（01本社/12関西工場）で安全在庫割れでも、同じ拠点に紐づく外部置き場に在庫があれば「移動すれば製造・出荷可能」と判定して不足数から差し引き、在庫移動指示リストを作成します。置き場と拠点の対応は、MRPアプリに登録済みのロケーションマスタ（「対応拠点」列）の最新データを自動取得して使用します。アップロードしたファイルは共有リポジトリに自動保存され、次回アップロードで上書きされるまで、このアプリ（未アップロード時）とMRPアプリの両方で共通利用されます。"
 )
 
 st.sidebar.markdown("---")
@@ -479,6 +481,54 @@ def fetch_github_file_bytes(path):
     except Exception:
         pass
     return None
+
+def save_github_file_bytes(path, content, message):
+    """MRPアプリと共有しているGitHubリポジトリへファイルを保存（上書き）する。
+    mrp_link.pyの自動連携と同じContents API・同じsecrets設定を使う。"""
+    gh = st.secrets.get("github", {})
+    token, repo = gh.get("token"), gh.get("repo")
+    if not token or not repo:
+        return False
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        sha = None
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+        payload = {"message": message, "content": base64.b64encode(content).decode("ascii")}
+        if sha:
+            payload["sha"] = sha
+        r = requests.put(url, headers=headers, json=payload, timeout=60)
+        return r.status_code in (200, 201)
+    except Exception:
+        return False
+
+def delete_github_file(path, message="旧ファイル削除（製造計画アプリから自動整理）"):
+    """共有リポジトリのファイルを削除する。ファイルが存在しない・失敗時はFalseを返す。"""
+    gh = st.secrets.get("github", {})
+    token, repo = gh.get("token"), gh.get("repo")
+    if not token or not repo:
+        return False
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200:
+            return False
+        sha = r.json().get("sha")
+        r2 = requests.delete(url, headers=headers, json={"message": message, "sha": sha}, timeout=30)
+        return r2.status_code == 200
+    except Exception:
+        return False
 
 def read_item_master_bytes(raw_bytes, filename="ItemMaster.csv"):
     """品目マスタのバイト列をDataFrameに変換する。MRPアプリのloaders/item_master.pyと同じ
@@ -1329,24 +1379,66 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                    '移動期限(計画開始日)', '移動元の利用可能在庫', '拠点の不足数(充当前)']
                 df_move_instr = pd.DataFrame(columns=MOVE_INSTR_COLS)
                 ext_summary_rows = []
+                EXT_ZAI_SAVE_BASE = "data/外部置き場_在庫推移リスト"
+                _df_ext_list = []
                 if file_ext_zai:
+                    # ⑧のアップロードを読み込み、MRPアプリと共通利用できるよう共有リポジトリへ自動保存（上書き）する
+                    _ext_raw_ok = []
+                    for _f_ext in file_ext_zai:
+                        try:
+                            safe_seek(_f_ext)
+                            _raw_e = _f_ext.read()
+                            _df_e = parse_ext_location_stock(io.BytesIO(_raw_e))
+                            if _df_e is not None and not _df_e.empty:
+                                _df_ext_list.append(_df_e)
+                                _ext_raw_ok.append(_raw_e)
+                        except Exception as _e_ext:
+                            st.warning(f"⚠️ 外部置き場 在庫推移リスト（{getattr(_f_ext, 'name', '')}）の読込に失敗しました: {_e_ext}")
+                    if _ext_raw_ok:
+                        _ext_digest = hashlib.md5(b"".join(_ext_raw_ok)).hexdigest()
+                        if st.session_state.get('ext_zai_saved') == _ext_digest:
+                            st.caption("✅ この外部置き場 在庫推移リストは保存済みです（MRPアプリと共通利用・次回アップロードで上書き）")
+                        else:
+                            _n_saved = 0
+                            for _i_e, _raw_e in enumerate(_ext_raw_ok, start=1):
+                                if save_github_file_bytes(f"{EXT_ZAI_SAVE_BASE}_{_i_e}.xlsx", _raw_e,
+                                                          "外部置き場在庫推移リスト連携（製造計画アプリから自動保存）"):
+                                    _n_saved += 1
+                            for _i_e in range(len(_ext_raw_ok) + 1, len(_ext_raw_ok) + 11):
+                                if not delete_github_file(f"{EXT_ZAI_SAVE_BASE}_{_i_e}.xlsx"):
+                                    break
+                            if _n_saved:
+                                st.session_state['ext_zai_saved'] = _ext_digest
+                                st.success(f"📤 外部置き場 在庫推移リスト（{_n_saved}ファイル）を共有リポジトリへ保存しました。次回のアップロードで上書きされるまで、このアプリとMRPアプリの両方で自動的に使われます（MRPアプリ側は1〜2分後に反映）。")
+                            else:
+                                st.warning("⚠️ 外部置き場 在庫推移リストの共有保存に失敗しました（今回の計算にはそのまま使用します）。")
+                else:
+                    # ⑧が未アップロードの場合は、前回保存した外部置き場在庫を共有リポジトリから自動読込する
+                    _saved_ext = []
+                    for _i_e in range(1, 11):
+                        _b_e = fetch_github_file_bytes(f"{EXT_ZAI_SAVE_BASE}_{_i_e}.xlsx")
+                        if _b_e is None:
+                            break
+                        _saved_ext.append(_b_e)
+                    for _i_e, _b_e in enumerate(_saved_ext, start=1):
+                        try:
+                            _df_e = parse_ext_location_stock(io.BytesIO(_b_e))
+                            if _df_e is not None and not _df_e.empty:
+                                _df_ext_list.append(_df_e)
+                        except Exception as _e_ext:
+                            st.warning(f"⚠️ 保存済みの外部置き場 在庫推移リスト（{_i_e}件目）の読込に失敗しました: {_e_ext}")
+                    if _df_ext_list:
+                        st.info(f"💾 前回保存した外部置き場 在庫推移リスト（{len(_df_ext_list)}ファイル）を使用して外部在庫を合算します。最新の在庫で判定したい場合は、⑧に新しいエクスポートをアップロードしてください（保存分は上書きされます）。")
+                if _df_ext_list:
                     _loc_bytes = fetch_github_file_bytes("data/ロケーションマスタ.xlsx")
                     _df_loc_sites = load_location_master_sites(_loc_bytes) if _loc_bytes else None
                     if _df_loc_sites is None or _df_loc_sites.empty:
                         st.warning("⚠️ MRPアプリのロケーションマスタ（「対応拠点」列）を取得できなかったため、外部置き場在庫の合算をスキップしました。MRPアプリの data/ロケーションマスタ.xlsx に「対応拠点」列が登録されているかご確認ください。")
                     else:
                         _allowed_locs = set(_df_loc_sites[_df_loc_sites['対応拠点'] == factory_mode]['ロケーション名'])
-                        _df_ext_list = []
-                        for _f_ext in file_ext_zai:
-                            try:
-                                _df_e = parse_ext_location_stock(_f_ext)
-                                if _df_e is not None and not _df_e.empty:
-                                    _df_ext_list.append(_df_e)
-                            except Exception as _e_ext:
-                                st.warning(f"⚠️ 外部置き場 在庫推移リスト（{getattr(_f_ext, 'name', '')}）の読込に失敗しました: {_e_ext}")
                         if not _allowed_locs:
                             st.warning(f"⚠️ ロケーションマスタに「対応拠点={factory_mode}」の外部置き場が登録されていないため、外部置き場在庫の合算をスキップしました。")
-                        elif _df_ext_list:
+                        else:
                             _df_ext_all = pd.concat(_df_ext_list, ignore_index=True)
                             _df_ext_all = _df_ext_all[_df_ext_all['ロケーション名'].isin(_allowed_locs)]
                             _df_ext_all = (_df_ext_all.groupby(['品目コード', 'ロケーション名'], as_index=False)
@@ -1396,8 +1488,6 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         st.dataframe(df_move_instr, hide_index=True, use_container_width=True)
                             else:
                                 st.caption("🏬 外部置き場在庫を読み込みましたが、安全在庫割れの品目が無いため在庫移動指示はありません。")
-                        else:
-                            st.warning("⚠️ 外部置き場 在庫推移リストから有効なデータを読み込めませんでした。")
 
                 # --- 月間計画書読み込み ---
                 _gekkan_keywords = ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"]

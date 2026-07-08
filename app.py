@@ -1129,6 +1129,26 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             return False
                     return True
 
+                def job_material_shortage(job, date_obj):
+                    """指定日に不足している袋・原料の一覧を返す（シート4「資材不足による延期」用）。
+                    各不足資材について、在庫推移データ上で在庫がプラスに回復する最初の日を入荷予定日とする。"""
+                    res = item_resource_dict.get(str(job.get('品目コード', '')).strip())
+                    if not res:
+                        return []
+                    out = []
+                    bag_code = res.get('bag')
+                    if bag_code:
+                        v = bag_stock_dict.get((bag_code, date_obj))
+                        if v is not None and v <= 0:
+                            arr = min((d for (c, d), q in bag_stock_dict.items() if c == bag_code and d > date_obj and q > 0), default=None)
+                            out.append({'code': bag_code, 'kind': '袋', 'arrival': arr})
+                    for raw_code in res.get('raw', []):
+                        v = raw_stock_dict.get((raw_code, date_obj))
+                        if v is not None and v <= 0:
+                            arr = min((d for (c, d), q in raw_stock_dict.items() if c == raw_code and d > date_obj and q > 0), default=None)
+                            out.append({'code': raw_code, 'kind': '原料', 'arrival': arr})
+                    return out
+
                 # --- 品目マスタ（袋サイズ切り替えルール用）読み込み ---
                 # 優先順位: ①手動アップロード(明示的な上書き) → ②MRPアプリと共有のGitHubリポジトリから自動取得
                 #           → ③セッションキャッシュ → ④ローカルキャッシュ
@@ -1800,6 +1820,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                         loop_d = get_next_w_date(period_start, holidays_input)
                         day_cnt = 1; sched = []
+                        # 資材不足による延期の記録: {(品目コード, 対象月度): {'品目名', '理想の製造日', '不足資材'}}
+                        delay_log = {}
+
+                        def _record_delay(job_r, d_r):
+                            _k = (job_r['品目コード'], job_r.get('対象月度', _first_month))
+                            if _k not in delay_log:
+                                delay_log[_k] = {'品目名': job_r['品目名'], '理想の製造日': d_r,
+                                                 '不足資材': job_material_shortage(job_r, d_r)}
 
                         while True:
                             # 応援で全量引き取られたジョブ(rem=0)を飛ばして、各ラインの実際の次ジョブを指す
@@ -1848,6 +1876,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                             break
                                         _candidate_idxs.append(_scan_idx)
                                     _ready_idxs = [i for i in _candidate_idxs if job_material_ready(queues[line][i], loop_d)]
+                                    for _bi in _candidate_idxs:
+                                        if _bi not in _ready_idxs:
+                                            _record_delay(queues[line][_bi], loop_d)
                                     _pool = _ready_idxs if _ready_idxs else _candidate_idxs
                                     _pick = next((i for i in _pool if any(k in str(queues[line][i].get('品目名', '')) for k in SPECIAL_CLEANING_KEYWORDS)), _pool[0] if _pool else None)
                                     if _pick is not None and _pick != _cur:
@@ -1875,6 +1906,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         # 原料・袋の在庫が無い日は、未着手のジョブに限り製造を後ろ倒しする
                                         # （前日から継続中のジョブは中断せず作り切る）
                                         if job['rem'] == job['計画製造袋数'] and not job_material_ready(job, loop_d):
+                                            _record_delay(job, loop_d)
                                             break
                                         sw = 5.0 if spent > 0 and p_rec == job['中身設計コード'] and p_vol and p_vol > job['容量_L'] else (10.0 if spent > 0 else 0.0)
                                         avail = cap_limit - spent - sw
@@ -1956,30 +1988,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             loop_d = get_next_w_date(loop_d + datetime.timedelta(days=1), holidays_input)
                             day_cnt += 1
                             if day_cnt > 60: break
-                        return sched, day_cnt - 1
+                        return sched, day_cnt - 1, delay_log
 
                     ov_res = 0
-                    full_sched, gen_days = run_sim(0)
+                    full_sched, gen_days, delay_log = run_sim(0)
                     if gen_days > target_bd:
                         # 残業を増やす前に、まず休みチームの応援稼働（残業なし）で収まるか試す
-                        ts, td = run_sim(0, cross_help=True)
-                        if td <= target_bd:
-                            full_sched = ts; gen_days = td
-                        else:
-                            _fit_found = False
-                            _last_ts, _last_td, _last_ov = ts, td, 0
+                        full_sched, gen_days, delay_log = run_sim(0, cross_help=True)
+                        if gen_days > target_bd:
                             for t_ov in [30, 60, 90, 120, 150, 180, 210]:
-                                ts, td = run_sim(t_ov, cross_help=True)
-                                _last_ts, _last_td, _last_ov = ts, td, t_ov
+                                ts, td, dl = run_sim(t_ov, cross_help=True)
                                 if td <= target_bd:
-                                    ov_res = t_ov; full_sched = ts; gen_days = td; _fit_found = True; break
-                            if not _fit_found:
-                                # 最大残業でも月内に収まらない場合は、最も日数の短い（最大OT）結果を採用
-                                ov_res = _last_ov; full_sched = _last_ts; gen_days = _last_td
+                                    ov_res = t_ov; full_sched = ts; gen_days = td; delay_log = dl; break
+                            # どの残業量でも月内に収まらない場合（資材待ち等）は、残業しても納期は
+                            # 守れないため、残業なし+応援ありの計画のまま翌月へ食い込ませる
 
                     df_final_sorted['対象月度'] = month_label
                     for _j in full_sched: _j['対象月度'] = month_label
-                    return full_sched, df_final_sorted, gen_days, ov_res
+                    return full_sched, df_final_sorted, gen_days, ov_res, delay_log
 
                 # =====================================================================
                 # 🌟 月度ごとに独立して計画を実行（各月の計画はその月内でスケジュール）
@@ -1995,6 +2021,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 _day_offset = 0
                 _cursor = start_date
                 _summary = []
+                _delay_all = {}
 
                 for _pi, (_m_num, _p_idx_d, _a_idx_d) in enumerate(month_col_pairs):
                     # この月度の計画残数をdf_m_distinctの月別列から取得
@@ -2017,7 +2044,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     else:
                         _target_bd = target_days
 
-                    _sched_p, _dfs_p, _days_p, _ov_p = _plan_period(
+                    _sched_p, _dfs_p, _days_p, _ov_p, _dl_p = _plan_period(
                         _df_mp,
                         use_inventory=(_pi == 0),
                         use_confirmed=(_pi == 0),
@@ -2026,6 +2053,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         day_offset=_day_offset,
                         month_label=_m_num
                     )
+                    for _dk, _dv in _dl_p.items():
+                        _delay_all.setdefault(_dk, _dv)
                     full_sched.extend(_sched_p)
                     if not _dfs_p.empty:
                         _df_frames.append(_dfs_p)
@@ -2147,7 +2176,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     if _days_p == 0:
                         st.info(f"ℹ️ {_m_num}月度: 計画対象なし")
                     elif _days_p > _tbd_p:
-                        st.error(f"🚨 {_m_num}月度: 最大残業（{_ov_p}分/日）でも月内（{_p_end.strftime('%m/%d')}・{_tbd_p}営業日）に収まらず、【{_days_p}日間】かかり翌月度に食い込みます。翌月度の計画開始はその分後ろ倒しになります。")
+                        st.error(f"🚨 {_m_num}月度: 月内（{_p_end.strftime('%m/%d')}・{_tbd_p}営業日）に収まらず、【{_days_p}日間】かかり翌月度に食い込みます。残業しても月内に収まらない（資材待ち等）ため残業なしで計画しています。翌月度の計画開始はその分後ろ倒しになります。")
                     elif _ov_p > 0:
                         st.warning(f"📢 {_m_num}月度: 月内（{_p_end.strftime('%m/%d')}まで）に収めるため毎日一律【{_ov_p}分】の残業が必要です（{_days_p}日間）。")
                     else:
@@ -2246,7 +2275,24 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     if fill:
                                         t_cell_row[si+3].fill = fill
 
-                for sheet in [ws1, ws2, ws3]:
+                # シート4: 資材不足による延期一覧（袋・原料の不足で製造を後ろ倒しした品目のみ）
+                ws4 = None
+                if _delay_all:
+                    ws4 = wb.create_sheet(title="資材不足による延期")
+                    ws4.append(["品目コード", "品目名", "対象月度", "理想の製造日", "製造納期(受注に間に合う日)", "不足資材コード", "資材種別", "不足資材の入荷予定日"])
+                    for (_dc, _dm), _dv in sorted(_delay_all.items(), key=lambda kv: kv[1]['理想の製造日']):
+                        try:
+                            _due = _get_month_end(f"{_dm}月", datetime.date.today()).strftime('%Y/%m/%d')
+                        except Exception:
+                            _due = ""
+                        _shorts = _dv['不足資材'] or [{'code': '(特定不可)', 'kind': '', 'arrival': None}]
+                        for _sh in _shorts:
+                            ws4.append([_dc, _dv['品目名'], f"{_dm}月度", _dv['理想の製造日'].strftime('%Y/%m/%d'), _due,
+                                        _sh['code'], _sh['kind'],
+                                        _sh['arrival'].strftime('%Y/%m/%d') if _sh['arrival'] else '入荷予定なし（在庫推移期間内に回復しません）'])
+                    st.warning(f"📦 資材不足により{len(_delay_all)}品目の製造を後ろ倒ししました。詳細はシート4「資材不足による延期」を確認してください。")
+
+                for sheet in [ws1, ws2, ws3] + ([ws4] if ws4 is not None else []):
                     sheet.row_dimensions[1].height = 26
                     for c in sheet[1]: c.fill = navy; c.font = w_font; c.alignment = Alignment(horizontal="center", vertical="center")
                     for r_idx in range(2, sheet.max_row+1):

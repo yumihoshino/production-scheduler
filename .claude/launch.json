@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "streamlit",
-      "runtimeExecutable": "streamlit",
-      "runtimeArgs": ["run", "app.py", "--server.headless", "true", "--server.port", "8501"],
+      "runtimeExecutable": "/private/tmp/claude-501/-Users-ohjirokunjp-Documents-GitHub-production-scheduler/fc16d493-9e7d-4ae0-a975-4ecb792256d3/scratchpad/run_streamlit.sh",
+      "runtimeArgs": ["--server.headless", "true", "--server.port", "8501"],
       "port": 8501
     }
   ]

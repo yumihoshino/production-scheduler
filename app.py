@@ -994,6 +994,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
         with st.spinner("⚡ 裏側でマスタを展開し、エコ・ハッシュエンジンで計画ファイルを出力中..."):
             try:
                 df_bom = None
+                bom_source = None
                 if file_bom is not None:
                     safe_seek(file_bom)
                     if file_bom.name.endswith('.csv'):
@@ -1002,16 +1003,21 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             safe_seek(file_bom)
                             df_bom = pd.read_csv(file_bom, encoding='cp932')
                     else: df_bom = clean_bom_master(load_excel_sheets_merged(file_bom, ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"]))
+                    bom_source = f"③アップロードファイル（{file_bom.name}）"
                 elif 'bom_data' in st.session_state:
                     df_bom = st.session_state['bom_data']
+                    bom_source = st.session_state.get('bom_source', "セッション内キャッシュ（今回のセッションで読み込んだもの）")
                 elif os.path.exists("bom_master_local.csv"):
                     try: df_bom = pd.read_csv("bom_master_local.csv", encoding='utf-8')
                     except: df_bom = pd.read_csv("bom_master_local.csv", encoding='cp932')
+                    bom_source = "サーバー保存キャッシュ（bom_master_local.csv・過去のアップロード分）"
                 elif os.path.exists("bom_master.xlsx"):
                     df_bom = clean_bom_master(pd.read_excel("bom_master.xlsx", header=None))
+                    bom_source = "リポジトリ同梱ファイル（bom_master.xlsx）"
                 elif os.path.exists("bom_master.csv"):
                     try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
                     except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
+                    bom_source = "リポジトリ同梱ファイル（bom_master.csv）"
 
                 if df_bom is None and file_gekkan is not None:
                     try:
@@ -1020,12 +1026,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         m_sheets = [s for s in xl_g.sheet_names if any(k in s for k in ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"])]
                         if m_sheets:
                             df_bom = clean_bom_master(pd.read_excel(xl_g, sheet_name=m_sheets[0], header=None))
+                            bom_source = f"月間製造計画書内のマスタシート（{m_sheets[0]}）"
                     except: pass
 
                 if df_bom is not None:
                     try:
                         df_bom.to_csv("bom_master_local.csv", index=False, encoding='utf-8')
                         st.session_state['bom_data'] = df_bom
+                        st.session_state['bom_source'] = bom_source
                     except: pass
 
                 if df_bom is None:
@@ -1065,6 +1073,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             else:
                                 if existing is None:
                                     bom_lookup_dict[pv_clean] = cv
+
+                st.caption(f"🧾 BOM構成表の読込元: {bom_source or '不明'}（配合照合辞書 {len(bom_lookup_dict)}件）")
 
                 # --- 原料・袋の在庫連動ルール用: BOM構成表から品目→袋コード／配合→原料コードを展開 ---
                 # BomMasterは「製造品目→(配合コード, 袋コード)」「配合コード→原料コード群(員数=構成比)」の
@@ -2096,6 +2106,20 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         st.success(f"🟢 {_m_num}月度: 残業不要・【{_days_p}日間】で完了します。")
 
                 lines_list = ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機", "その他"]
+
+                # 配合コードの照合結果チェック
+                # extract_content_codeはBOMで見つからない品目に品目コードをそのまま返すため、
+                # 「中身設計コード == 品目コード」の品目はBOM照合に失敗している
+                _unique_items_chk = df_final_sorted[['品目コード', '中身設計コード']].drop_duplicates(subset=['品目コード'])
+                _fallback_items = _unique_items_chk[_unique_items_chk['品目コード'].astype(str).str.strip() == _unique_items_chk['中身設計コード'].astype(str).str.strip()]
+                _n_items_chk, _n_fb = len(_unique_items_chk), len(_fallback_items)
+                if _n_items_chk > 0 and _n_fb > 0:
+                    _fb_rate = _n_fb / _n_items_chk
+                    _fb_examples = "、".join(_fallback_items['品目コード'].astype(str).head(5))
+                    if _fb_rate >= 0.5:
+                        st.error(f"🚨 配合コードの照合に{_n_items_chk}品目中{_n_fb}品目が失敗し、品目コードをそのまま配合コードとして出力します（例: {_fb_examples}）。BOM構成表（読込元: {bom_source or '不明'}）が古い・工場違い・形式不一致の可能性があります。③に最新のBOM構成表マスタをアップロードして再生成してください。")
+                    else:
+                        st.warning(f"⚠️ {_n_fb}品目（全{_n_items_chk}品目中）がBOM構成表に見つからず、品目コードをそのまま配合コードとして出力します: {_fb_examples}{'…' if _n_fb > 5 else ''}")
 
                 # 出力する指示書を「指示書の最終出力日」までに絞り込む（計画自体は月度末・期末まで作成済み）
                 if output_end_date < _month_end:

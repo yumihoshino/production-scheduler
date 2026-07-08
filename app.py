@@ -391,6 +391,13 @@ target_days = st.sidebar.number_input(
 )
 st.sidebar.caption(f"📌 {start_date.strftime('%Y/%m/%d')}〜{_month_end.strftime('%Y/%m/%d')}の営業日数を自動計算：{_auto_target_days}日")
 
+output_end_date = st.sidebar.date_input(
+    "📤 指示書の最終出力日",
+    value=_month_end,
+    min_value=start_date,
+    help="計画自体は月度末・期末まで作成されますが、出力する指示書（日別・号機別製造計画／タイムテーブル、バッチ集計）はここで指定した日までの分に絞り込んで出力します。"
+)
+
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 1. ファイルのアップロード")
 file_zai = st.sidebar.file_uploader("① 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
@@ -2090,6 +2097,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 lines_list = ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機", "その他"] if factory_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機", "その他"]
 
+                # 出力する指示書を「指示書の最終出力日」までに絞り込む（計画自体は月度末・期末まで作成済み）
+                if output_end_date < _month_end:
+                    full_sched_out = [j for j in full_sched if datetime.datetime.strptime(j['製造日'], "%Y/%m/%d").date() <= output_end_date]
+                    _kept_codes_out = {j['品目コード'] for j in full_sched_out}
+                    # 天川計画（月度単位のみでタイムテーブル対象外）は出力日にかかわらずそのまま含める
+                    df_final_sorted_out = df_final_sorted[df_final_sorted['品目コード'].isin(_kept_codes_out) | (df_final_sorted['製造ライン'] == '天川')].copy()
+                    st.info(f"📤 指示書の最終出力日（{output_end_date.strftime('%Y/%m/%d')}）までの分に絞り込んで出力します。計画自体は{_month_end.strftime('%Y/%m/%d')}まで作成済みです。")
+                else:
+                    full_sched_out = full_sched
+                    df_final_sorted_out = df_final_sorted
+
                 wb = Workbook(); wb.remove(wb.active)
                 navy = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
                 w_font = Font(name="Meiryo UI", size=11, bold=True, color="FFFFFF")
@@ -2098,11 +2116,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 ws1 = wb.create_sheet(title="製造品目・バッチ集計"); ws1.views.sheetView[0].showGridLines = True
                 ws1.append(["対象月度", "品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "当月度の計画残数", "生産ロット", "決定製造m3", "最終製造総数(袋)", "製造理由"])
-                for _, r in df_final_sorted.iterrows(): ws1.append([f"{r.get('対象月度', '')}月度", r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], r['安全割れ不足数'], r['今月の計画残数'], (int(r['生産ロット']) if r.get('生産ロット', 0) > 0 else ""), r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
+                for _, r in df_final_sorted_out.iterrows(): ws1.append([f"{r.get('対象月度', '')}月度", r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], r['安全割れ不足数'], r['今月の計画残数'], (int(r['生産ロット']) if r.get('生産ロット', 0) > 0 else ""), r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
 
                 ws2 = wb.create_sheet(title="日別・号機別製造計画"); ws2.views.sheetView[0].showGridLines = True
                 ws2.append(["稼働日", "製造日", "曜日", "対象月度", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
-                for j in full_sched: ws2.append([j['稼働日'], j['製造日'], j['曜日'], f"{j.get('対象月度', '')}月度" if j.get('対象月度', '') != '' else '', j['製造ライン'], j['配合コード'], j['品目コード'], j['品目名'], j['指示数量(袋)'], j['製造時間(分)'], j['切り替え(分)'], j['合計拘束時間(分)'], j['備考'], j['製造理由']])
+                for j in full_sched_out: ws2.append([j['稼働日'], j['製造日'], j['曜日'], f"{j.get('対象月度', '')}月度" if j.get('対象月度', '') != '' else '', j['製造ライン'], j['配合コード'], j['品目コード'], j['品目名'], j['指示数量(袋)'], j['製造時間(分)'], j['切り替え(分)'], j['合計拘束時間(分)'], j['備考'], j['製造理由']])
 
                 ws3 = wb.create_sheet(title="日別・30分タイムテーブル"); ws3.views.sheetView[0].showGridLines = True
                 slots = ["8:00〜8:30", "8:30〜9:00", "9:00〜9:30", "9:30〜10:00", "10:00〜10:10(休憩)", "10:10〜10:30", "10:30〜11:00", "11:00〜11:30", "11:30〜12:00", "12:00〜13:00(昼休)", "13:00〜13:30", "13:30〜14:00", "14:00〜14:30", "14:30〜15:00", "15:00〜15:10(休憩)", "15:10〜15:30", "15:30〜16:00", "16:00〜16:30", "16:30〜17:00", "17:00〜17:30", "17:30〜18:00", "18:00〜18:30", "18:30〜19:00", "19:00〜19:30", "19:30〜20:00"]
@@ -2110,7 +2128,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 u_days = []
                 seen_d = set()
-                for j in full_sched:
+                for j in full_sched_out:
                     k = (j['稼働日'], j['製造日'])
                     if k not in seen_d: seen_d.add(k); u_days.append(k)
 
@@ -2134,7 +2152,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 REASON_PRIORITY = {'現在庫がマイナス': 4, '安全在庫割れ': 3, '計画未達': 2, '製造指示済': 1}
                 cell_reason_priority = {}
 
-                for j in full_sched:
+                for j in full_sched_out:
                     t_cell_row = mat_map.get((j['稼働日'], j['製造ライン']))
                     if t_cell_row:
                         sm = j['t_start']; em = j['t_end']
@@ -2188,6 +2206,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                 out_io = io.BytesIO(); wb.save(out_io); out_io.seek(0)
                 _fname_period = f"{target_month}度〜10月度(期末)" if plan_to_yearend else f"{target_month}度"
+                if output_end_date < _month_end:
+                    _fname_period += f"_〜{output_end_date.strftime('%m%d')}"
                 st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{_fname_period}_スケジュール表.xlsx")
 
                 # =====================================================================
@@ -2199,7 +2219,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 _gen_loc = "01" if factory_mode == "本社" else "12"
                 _gen_rows = []
                 _gen_seq_ctr = {}
-                for j in sorted(full_sched, key=lambda r: (r['製造日'], r['製造ライン'], r['t_start'])):
+                for j in sorted(full_sched_out, key=lambda r: (r['製造日'], r['製造ライン'], r['t_start'])):
                     _seq_key = (j['製造日'], j['製造ライン'])
                     _gen_seq_ctr[_seq_key] = _gen_seq_ctr.get(_seq_key, 0) + 1
                     _gen_rows.append({

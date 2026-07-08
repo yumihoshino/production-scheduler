@@ -421,6 +421,11 @@ file_raw_zai = st.sidebar.file_uploader(
     "⑦ [任意] 原料 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"],
     help="原料の在庫が無い日は、その品目の製造を在庫が回復する日まで自動的に後ろ倒しします。"
 )
+file_ext_zai = st.sidebar.file_uploader(
+    "⑧ [任意] 外部置き場 在庫推移リスト (Excel形式: .xlsx・複数可)", type=["xlsx"],
+    accept_multiple_files=True,
+    help="外部置き場ロケーションでエクスポートした在庫推移リスト（複数ロケーション込みでも可）です。拠点（01本社/12関西工場）で安全在庫割れでも、同じ拠点に紐づく外部置き場に在庫があれば「移動すれば製造・出荷可能」と判定して不足数から差し引き、在庫移動指示リストを作成します。置き場と拠点の対応は、MRPアプリに登録済みのロケーションマスタ（「対応拠点」列）の最新データを自動取得して使用します。"
+)
 
 st.sidebar.markdown("---")
 consider_iko = st.sidebar.checkbox(
@@ -486,6 +491,54 @@ def read_item_master_bytes(raw_bytes, filename="ItemMaster.csv"):
         except Exception:
             continue
     return None
+
+def load_location_master_sites(raw_bytes):
+    """MRPアプリの data/ロケーションマスタ.xlsx を読み込み、「対応拠点」列で拠点に
+    紐づけられた外部置き場（対応拠点・ロケーションコード・ロケーション名）を返す。
+    対応拠点列が無い・読めない場合は None を返す。"""
+    try:
+        raw = pd.read_excel(io.BytesIO(raw_bytes), header=None, dtype=str)
+    except Exception:
+        return None
+    header_row = next((i for i in range(min(10, len(raw))) if 'ロケーションコード' in [str(v).strip() for v in raw.iloc[i].values]), None)
+    if header_row is None:
+        return None
+    df = raw.iloc[header_row+1:].copy()
+    df.columns = [str(c).strip() for c in raw.iloc[header_row].values]
+    if '対応拠点' not in df.columns or 'ロケーション名' not in df.columns:
+        return None
+    df['対応拠点'] = df['対応拠点'].astype(str).str.strip()
+    df['ロケーション名'] = df['ロケーション名'].astype(str).str.strip()
+    df = df[df['対応拠点'].isin(['本社', '関西工場']) & (df['ロケーション名'] != '') & (df['ロケーション名'].str.lower() != 'nan')]
+    keep = [c for c in ['対応拠点', 'ロケーションコード', 'ロケーション名'] if c in df.columns]
+    return df[keep].drop_duplicates(['対応拠点', 'ロケーション名']).reset_index(drop=True)
+
+def parse_ext_location_stock(file):
+    """外部置き場ロケーションでエクスポートした在庫推移リスト（ロケーション名列あり）から、
+    品目×置き場ごとの利用可能在庫を作る。複数ロケーション混在のファイルにも対応。
+    利用可能在庫は予測期間中の最小在庫（置き場からの出荷予定があっても安全側に判定・マイナスは0扱い）。"""
+    raw = load_excel_sheets_merged(file, ["在庫推移リスト", "在庫推移"])
+    header_idx = next((i for i in range(len(raw)) if any(kw in [str(v).strip() for v in raw.iloc[i].values] for kw in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE'])), None)
+    if header_idx is None:
+        raise ValueError("見出し行（品目コード）が見つかりません")
+    headers = [str(h).strip() for h in raw.iloc[header_idx].values]
+    headers = ['品目コード' if h in ['品目コード', '品目ｺｰﾄﾞ', '商品コード', '商品CD', '商品CODE'] else ('品目名' if h in ['品目名', '商品名'] else ('種類' if h in ['種類', '区分'] else h)) for h in headers]
+    df = raw.iloc[header_idx+1:].copy()
+    df.columns = headers
+    if 'ロケーション名' not in df.columns:
+        raise ValueError("ロケーション名列がありません（ロケーション別のエクスポートをご利用ください）")
+    df['品目コード'] = df['品目コード'].ffill().astype(str).str.strip()
+    df['ロケーション名'] = df['ロケーション名'].ffill().astype(str).str.strip()
+    df['品目名'] = df['品目名'].ffill().astype(str).str.strip() if '品目名' in df.columns else ''
+    dz = df[df['種類'] == '在'].copy()
+    date_cols = [c for c in dz.columns if re.match(r'^\d{1,2}[/\-]\d{1,2}', str(c).strip())]
+    if dz.empty or not date_cols:
+        return pd.DataFrame(columns=['品目コード', 'ロケーション名', '品目名', '利用可能在庫'])
+    vals = dz[date_cols].apply(pd.to_numeric, errors='coerce')
+    dz['利用可能在庫'] = vals.min(axis=1, skipna=True).clip(lower=0)
+    dz = dz.dropna(subset=['利用可能在庫'])
+    return dz.groupby(['品目コード', 'ロケーション名'], as_index=False).agg(
+        品目名=('品目名', 'first'), 利用可能在庫=('利用可能在庫', 'sum'))
 
 def load_excel_sheets_merged(file, keywords, exclude_keywords=None):
     safe_seek(file)
@@ -1266,6 +1319,86 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_zai_in_zai['入庫予定合計'] = df_zai_in_zai['品目コード'].map(iko_total_dict).fillna(0.0)
                 df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全在庫数'] - df_zai_in_zai['現在の在庫'] - df_zai_in_zai['入庫予定合計']).apply(lambda x: max(0, x))
 
+                # --- 外部置き場在庫の合算と在庫移動指示リストの作成 ---
+                #   拠点ロケーション(01本社/12関西工場)で安全在庫割れでも、同じ拠点に紐づく
+                #   外部置き場に在庫があれば移動で充当できるため、不足数から差し引いて
+                #   「移動すれば製造・出荷可能」と判定する。置き場と拠点の対応は、MRPアプリの
+                #   ロケーションマスタ(data/ロケーションマスタ.xlsx・対応拠点列)の最新データを共有リポジトリから取得する。
+                df_zai_in_zai['外部在庫充当数'] = 0.0
+                MOVE_INSTR_COLS = ['品目コード', '品目名', '移動元ロケーション', '移動数量(袋)', '移動先',
+                                   '移動期限(計画開始日)', '移動元の利用可能在庫', '拠点の不足数(充当前)']
+                df_move_instr = pd.DataFrame(columns=MOVE_INSTR_COLS)
+                ext_summary_rows = []
+                if file_ext_zai:
+                    _loc_bytes = fetch_github_file_bytes("data/ロケーションマスタ.xlsx")
+                    _df_loc_sites = load_location_master_sites(_loc_bytes) if _loc_bytes else None
+                    if _df_loc_sites is None or _df_loc_sites.empty:
+                        st.warning("⚠️ MRPアプリのロケーションマスタ（「対応拠点」列）を取得できなかったため、外部置き場在庫の合算をスキップしました。MRPアプリの data/ロケーションマスタ.xlsx に「対応拠点」列が登録されているかご確認ください。")
+                    else:
+                        _allowed_locs = set(_df_loc_sites[_df_loc_sites['対応拠点'] == factory_mode]['ロケーション名'])
+                        _df_ext_list = []
+                        for _f_ext in file_ext_zai:
+                            try:
+                                _df_e = parse_ext_location_stock(_f_ext)
+                                if _df_e is not None and not _df_e.empty:
+                                    _df_ext_list.append(_df_e)
+                            except Exception as _e_ext:
+                                st.warning(f"⚠️ 外部置き場 在庫推移リスト（{getattr(_f_ext, 'name', '')}）の読込に失敗しました: {_e_ext}")
+                        if not _allowed_locs:
+                            st.warning(f"⚠️ ロケーションマスタに「対応拠点={factory_mode}」の外部置き場が登録されていないため、外部置き場在庫の合算をスキップしました。")
+                        elif _df_ext_list:
+                            _df_ext_all = pd.concat(_df_ext_list, ignore_index=True)
+                            _df_ext_all = _df_ext_all[_df_ext_all['ロケーション名'].isin(_allowed_locs)]
+                            _df_ext_all = (_df_ext_all.groupby(['品目コード', 'ロケーション名'], as_index=False)
+                                           .agg(品目名=('品目名', 'first'), 利用可能在庫=('利用可能在庫', 'sum')))
+                            _df_ext_all = _df_ext_all[_df_ext_all['利用可能在庫'] > 0]
+                            _dest_label = "01 本社" if factory_mode == "本社" else "12 関西工場"
+                            _move_deadline = start_date.strftime('%Y/%m/%d')
+                            _covered_dict = {}
+                            _move_rows = []
+                            for _, _srow in df_zai_in_zai[df_zai_in_zai['安全割れ不足数'] > 0].iterrows():
+                                _code_s = str(_srow['品目コード']).strip()
+                                _short_s = float(_srow['安全割れ不足数'])
+                                _name_s = str(_srow['品目名']).strip()
+                                _locs_s = _df_ext_all[_df_ext_all['品目コード'] == _code_s]
+                                _remaining, _moved = _short_s, 0
+                                for _, _lrow in _locs_s.sort_values('利用可能在庫', ascending=False).iterrows():
+                                    if _remaining <= 0: break
+                                    _avail_l = int(math.floor(float(_lrow['利用可能在庫'])))
+                                    _take = int(min(math.ceil(_remaining), _avail_l))
+                                    if _take <= 0: continue
+                                    _move_rows.append([_code_s, _name_s, _lrow['ロケーション名'], _take, _dest_label,
+                                                       _move_deadline, _avail_l, _short_s])
+                                    _moved += _take; _remaining -= _take
+                                if _moved > 0:
+                                    _covered_dict[_code_s] = _covered_dict.get(_code_s, 0) + _moved
+                                _total_avail_s = float(_locs_s['利用可能在庫'].sum()) if not _locs_s.empty else 0.0
+                                _verdict = ('✅ 全量充当可（移動すれば製造・出荷可能）' if _moved >= _short_s
+                                            else ('△ 一部充当（残りは製造対象）' if _moved > 0 else '❌ 外部在庫なし（製造対象）'))
+                                ext_summary_rows.append({'品目コード': _code_s, '品目名': _name_s,
+                                                         '安全割れ不足数': _short_s, '外部利用可能在庫': _total_avail_s,
+                                                         '移動数量合計': _moved, '判定': _verdict})
+                            if _move_rows:
+                                df_move_instr = pd.DataFrame(_move_rows, columns=MOVE_INSTR_COLS).sort_values('品目コード').reset_index(drop=True)
+                                df_zai_in_zai['外部在庫充当数'] = df_zai_in_zai['品目コード'].astype(str).str.strip().map(_covered_dict).fillna(0.0)
+                                df_zai_in_zai['安全割れ不足数'] = (df_zai_in_zai['安全割れ不足数'] - df_zai_in_zai['外部在庫充当数']).clip(lower=0)
+                            if ext_summary_rows:
+                                _n_full = sum(1 for s in ext_summary_rows if s['判定'].startswith('✅'))
+                                _n_part = sum(1 for s in ext_summary_rows if s['判定'].startswith('△'))
+                                st.success(f"🏬 外部置き場在庫の合算（対応拠点: {factory_mode} / 対象置き場: {'、'.join(sorted(_allowed_locs))}）: "
+                                           f"安全割れ{len(ext_summary_rows)}品目のうち、全量充当可 {_n_full}品目・一部充当 {_n_part}品目。"
+                                           f"充当分を不足数から差し引いて製造計画を作成し、在庫移動指示リスト（{len(df_move_instr)}件）を確定版Excelのシートに出力します。")
+                                with st.expander("📋 在庫移動指示リスト（外部置き場 → 拠点）と充当サマリー", expanded=True):
+                                    st.markdown(f"**品目別の充当サマリー**（移動期限: 計画開始日 {_move_deadline} まで）")
+                                    st.dataframe(pd.DataFrame(ext_summary_rows), hide_index=True, use_container_width=True)
+                                    if not df_move_instr.empty:
+                                        st.markdown("**在庫移動指示リスト**（どの置き場から・いくつ・どこへ）")
+                                        st.dataframe(df_move_instr, hide_index=True, use_container_width=True)
+                            else:
+                                st.caption("🏬 外部置き場在庫を読み込みましたが、安全在庫割れの品目が無いため在庫移動指示はありません。")
+                        else:
+                            st.warning("⚠️ 外部置き場 在庫推移リストから有効なデータを読み込めませんでした。")
+
                 # --- 月間計画書読み込み ---
                 _gekkan_keywords = ["本社 月間製造計画書", "月間製造計画書", "月間計画", "本社"] if factory_mode == "本社" else ["関西工場 月間製造計画書", "関西工場", "関西製造計画", "計画", "月間製造計画書"]
                 df_monthly_raw = load_excel_sheets_merged(
@@ -1479,6 +1612,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             '品目名': zai_row['品目名'].iloc[0] if not zai_row.empty else (plan_row['品目名_計画書'].iloc[0] if not plan_row.empty else "不明"),
                             '現在の在庫': zai_row['現在の在庫'].iloc[0] if not zai_row.empty else np.nan,
                             '安全在庫数': zai_row['安全在庫数'].iloc[0] if not zai_row.empty else np.nan,
+                            '外部在庫充当数': zai_row['外部在庫充当数'].iloc[0] if not zai_row.empty else 0.0,
                         }
                         _anzen = zai_row['安全割れ不足数'].iloc[0] if not zai_row.empty else 0.0
 
@@ -1568,7 +1702,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             return int(round((r['製造決定_m3'] * 1000 * 0.9 * r['分配比率']) / vol))
 
                     df_final['計画製造袋数'] = df_final.apply(calc_bags, axis=1).clip(lower=0)
-                    df_final['製造理由'] = df_final.apply(lambda r: ('計画未達' if r.get('対象月度', _first_month) != _first_month else ('現在庫がマイナス' if not pd.isna(r['現在の在庫']) and r['現在の在庫'] < 0 else ('安全在庫割れ' if r['安全割れ不足数'] > 0 else '計画未達'))), axis=1)
+                    # 現在庫の判定は外部置き場からの移動充当分（外部在庫充当数）を加味した実効在庫で行う
+                    df_final['製造理由'] = df_final.apply(lambda r: ('計画未達' if r.get('対象月度', _first_month) != _first_month else ('現在庫がマイナス' if not pd.isna(r['現在の在庫']) and (r['現在の在庫'] + r.get('外部在庫充当数', 0.0)) < 0 else ('安全在庫割れ' if r['安全割れ不足数'] > 0 else '計画未達'))), axis=1)
                     df_final['計画製造袋数'] = df_final.apply(lambda r: 0 if r['製造理由'] == '計画未達' and r['計画製造袋数'] < 100 and r.get('生産ロット', 0) <= 0 else r['計画製造袋数'], axis=1)
                     df_final['堆肥・腐葉土フラグ'] = df_final['品目名'].apply(lambda n: any(k in str(n) for k in ['腐葉土', '堆肥', '特大袋']))
 
@@ -2156,7 +2291,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     _tk_rows.append({
                                         '対象月度': _m_num_tk, '品目コード': _code_tk, '品目名': _name_tk,
                                         '製造ライン': '天川', '中身設計コード': extract_content_code(_code_tk),
-                                        '現在の在庫': np.nan, '安全在庫数': np.nan, '安全割れ不足数': 0.0,
+                                        '現在の在庫': np.nan, '安全在庫数': np.nan, '安全割れ不足数': 0.0, '外部在庫充当数': 0.0,
                                         '今月の計画残数': _zan_tk, '生産ロット': _lot_tk,
                                         '製造決定_m3': _m3_tk, '計画製造袋数': _bags_tk,
                                         '製造理由': '天川計画', '容量_L': _vol_tk,
@@ -2216,8 +2351,8 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 b_all = Border(left=Side(style="thin", color="D9D9D9"), right=Side(style="thin", color="D9D9D9"), top=Side(style="thin", color="D9D9D9"), bottom=Side(style="thin", color="D9D9D9"))
 
                 ws1 = wb.create_sheet(title="製造品目・バッチ集計"); ws1.views.sheetView[0].showGridLines = True
-                ws1.append(["対象月度", "品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "安全割れ不足数", "当月度の計画残数", "生産ロット", "決定製造m3", "最終製造総数(袋)", "製造理由"])
-                for _, r in df_final_sorted_out.iterrows(): ws1.append([f"{r.get('対象月度', '')}月度", r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], r['安全割れ不足数'], r['今月の計画残数'], (int(r['生産ロット']) if r.get('生産ロット', 0) > 0 else ""), r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
+                ws1.append(["対象月度", "品目コード", "品目名", "製造ライン", "配合レシピ", "現在の在庫", "安全在庫数", "外部在庫充当(移動)", "安全割れ不足数", "当月度の計画残数", "生産ロット", "決定製造m3", "最終製造総数(袋)", "製造理由"])
+                for _, r in df_final_sorted_out.iterrows(): ws1.append([f"{r.get('対象月度', '')}月度", r['品目コード'], r['品目名'], r['製造ライン'], r['中身設計コード'], r['現在の在庫'], r['安全在庫数'], (r.get('外部在庫充当数', 0.0) if r.get('外部在庫充当数', 0.0) and not pd.isna(r.get('外部在庫充当数', 0.0)) else ""), r['安全割れ不足数'], r['今月の計画残数'], (int(r['生産ロット']) if r.get('生産ロット', 0) > 0 else ""), r['製造決定_m3'], r['計画製造袋数'], r['製造理由']])
 
                 ws2 = wb.create_sheet(title="日別・号機別製造計画"); ws2.views.sheetView[0].showGridLines = True
                 ws2.append(["稼働日", "製造日", "曜日", "対象月度", "製造ライン", "配合コード", "品目コード", "品目名", "指示数量(袋)", "製造時間(分)", "切り替え(分)", "合計拘束時間(分)", "備考", "製造理由"])
@@ -2292,7 +2427,15 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                         _sh['arrival'].strftime('%Y/%m/%d') if _sh['arrival'] else '入荷予定なし（在庫推移期間内に回復しません）'])
                     st.warning(f"📦 資材不足により{len(_delay_all)}品目の製造を後ろ倒ししました。詳細はシート4「資材不足による延期」を確認してください。")
 
-                for sheet in [ws1, ws2, ws3] + ([ws4] if ws4 is not None else []):
+                # シート5: 在庫移動指示リスト（外部置き場 → 拠点）
+                ws5 = None
+                if not df_move_instr.empty:
+                    ws5 = wb.create_sheet(title="在庫移動指示リスト")
+                    ws5.append(MOVE_INSTR_COLS)
+                    for _, _mr in df_move_instr.iterrows():
+                        ws5.append([_mr[c] for c in MOVE_INSTR_COLS])
+
+                for sheet in [ws1, ws2, ws3] + ([ws4] if ws4 is not None else []) + ([ws5] if ws5 is not None else []):
                     sheet.row_dimensions[1].height = 26
                     for c in sheet[1]: c.fill = navy; c.font = w_font; c.alignment = Alignment(horizontal="center", vertical="center")
                     for r_idx in range(2, sheet.max_row+1):

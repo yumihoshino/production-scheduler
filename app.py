@@ -1792,7 +1792,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         return jobs_seq
                     queues_base = {line: _build_line_queue(df_final_sorted[df_final_sorted['製造ライン'] == line]) for line in lines_list}
 
-                    def run_sim(ov_mins):
+                    def run_sim(ov_mins, cross_help=False):
                         queues = copy.deepcopy(queues_base)
                         cur_idx = {l: 0 for l in queues}
                         for l in queues:
@@ -1802,6 +1802,10 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         day_cnt = 1; sched = []
 
                         while True:
+                            # 応援で全量引き取られたジョブ(rem=0)を飛ばして、各ラインの実際の次ジョブを指す
+                            for l in lines_list:
+                                while cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] <= 0:
+                                    cur_idx[l] += 1
                             active = [l for l in lines_list if cur_idx[l] < len(queues[l]) and queues[l][cur_idx[l]]['rem'] > 0 or any(j['rem'] > 0 and job_can_support(l, j, factory_mode) for ol in lines_list if ol != l for j in queues[ol])]
                             if not active: break
 
@@ -1862,6 +1866,9 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                     idx = cur_idx[line]
                                     if idx < len(queues[line]):
                                         job = queues[line][idx]
+                                        # 応援で他ラインに全量引き取られたジョブはスキップ（0袋行を出さない）
+                                        if job['rem'] <= 0:
+                                            cur_idx[line] += 1; continue
                                         # 同月度内計画: 対象月度がまだ来ていないジョブは当日処理しない
                                         if _month_order.get(job.get('対象月度', _first_month), 0) > _month_order.get(loop_d.month, 99):
                                             break
@@ -1910,6 +1917,42 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                                         spent += sw + dur; job['rem'] -= b_make; sup_found = True; p_rec = job['中身設計コード']; p_vol = job['容量_L']; break
                                             if sup_found: break
                                         if not sup_found: break
+
+                            # 🆘 残業回避応援（cross_help時のみ）: 稼働チームが上限まで働いても当日処理
+                            # しきれない当月ジョブが残る場合、休みチームの対応可能ラインを同日応援稼働
+                            # させて吸収する（残業なしで目標日数に収まらない場合にのみ有効化される）
+                            if cross_help:
+                                for line in [l for l in lines_list if l not in run_today]:
+                                    spent = 0.0
+                                    cap_limit = max(0.0, cap_limit_day - get_line_stop_minutes(line, loop_d, factory_mode))
+                                    if cap_limit <= 0: continue
+                                    while spent < cap_limit:
+                                        sup_found = False
+                                        for o_line in run_today:
+                                            # キュー末尾から引き取る（持ち主が翌日続けるはずの先頭ジョブを奪わない）
+                                            for job in reversed(queues[o_line]):
+                                                if (job['rem'] > 0
+                                                        and _month_order.get(job.get('対象月度', _first_month), 0) <= _month_order.get(loop_d.month, 99)
+                                                        and (job['rem'] < job['計画製造袋数'] or job_material_ready(job, loop_d))
+                                                        and job_can_support(line, job, factory_mode)):
+                                                    sw = 10.0 if spent > 0 else 0.0
+                                                    avail = cap_limit - spent - sw
+                                                    if avail <= 5.0: break
+                                                    sp_min = (646 if line == '5号機' else 500) / 60 if factory_mode == "関西工場" else ((730 if job['容量_L'] in [12, 14] else 650) if line == '5号機' else 400) / 60
+                                                    max_b = avail * sp_min
+                                                    if job['rem'] <= max_b:
+                                                        b_make = job['rem']; dur = b_make / sp_min
+                                                        sched.append({'稼働日': f"{day_offset + day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': f"★{o_line}応援(全量)", '製造理由': job['製造理由'], '対象月度': f"{job.get('対象月度', '')}月度", 't_start': spent + sw, 't_end': spent + sw + dur})
+                                                        spent += sw + dur; job['rem'] = 0; sup_found = True; break
+                                                    else:
+                                                        b_make = math.floor(max_b)
+                                                        if b_make <= 0: break
+                                                        dur = b_make / sp_min
+                                                        sched.append({'稼働日': f"{day_offset + day_cnt}日目", '製造日': d_str_disp, '曜日': w_kanji, '製造ライン': line, '配合コード': job['中身設計コード'], '品目コード': job['品目コード'], '品目名': job['品目名'], '指示数量(袋)': int(b_make), '製造時間(分)': round(dur, 1), '切り替え(分)': round(sw, 1), '合計拘束時間(分)': round(sw + dur, 1), '備考': f"★{o_line}応援(継続)", '製造理由': job['製造理由'], '対象月度': f"{job.get('対象月度', '')}月度", 't_start': spent + sw, 't_end': spent + sw + dur})
+                                                        spent += sw + dur; job['rem'] -= b_make; sup_found = True; break
+                                            if sup_found: break
+                                        if not sup_found: break
+
                             loop_d = get_next_w_date(loop_d + datetime.timedelta(days=1), holidays_input)
                             day_cnt += 1
                             if day_cnt > 60: break
@@ -1918,16 +1961,21 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     ov_res = 0
                     full_sched, gen_days = run_sim(0)
                     if gen_days > target_bd:
-                        _fit_found = False
-                        _last_ts, _last_td, _last_ov = full_sched, gen_days, 0
-                        for t_ov in [30, 60, 90, 120, 150, 180, 210]:
-                            ts, td = run_sim(t_ov)
-                            _last_ts, _last_td, _last_ov = ts, td, t_ov
-                            if td <= target_bd:
-                                ov_res = t_ov; full_sched = ts; gen_days = td; _fit_found = True; break
-                        if not _fit_found:
-                            # 最大残業でも月内に収まらない場合は、最も日数の短い（最大OT）結果を採用
-                            ov_res = _last_ov; full_sched = _last_ts; gen_days = _last_td
+                        # 残業を増やす前に、まず休みチームの応援稼働（残業なし）で収まるか試す
+                        ts, td = run_sim(0, cross_help=True)
+                        if td <= target_bd:
+                            full_sched = ts; gen_days = td
+                        else:
+                            _fit_found = False
+                            _last_ts, _last_td, _last_ov = ts, td, 0
+                            for t_ov in [30, 60, 90, 120, 150, 180, 210]:
+                                ts, td = run_sim(t_ov, cross_help=True)
+                                _last_ts, _last_td, _last_ov = ts, td, t_ov
+                                if td <= target_bd:
+                                    ov_res = t_ov; full_sched = ts; gen_days = td; _fit_found = True; break
+                            if not _fit_found:
+                                # 最大残業でも月内に収まらない場合は、最も日数の短い（最大OT）結果を採用
+                                ov_res = _last_ov; full_sched = _last_ts; gen_days = _last_td
 
                     df_final_sorted['対象月度'] = month_label
                     for _j in full_sched: _j['対象月度'] = month_label

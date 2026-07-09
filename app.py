@@ -4,6 +4,7 @@ import numpy as np
 import math
 import re
 import io
+from mrp_link import mrp_auto_link
 import os
 import copy
 import datetime
@@ -2560,6 +2561,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if output_end_date < _month_end:
                     _fname_period += f"_〜{output_end_date.strftime('%m%d')}"
                 st.download_button("📊 指示スケジュール表(.xlsx)をダウンロード", out_io, f"【確定版】{factory_mode}_{_fname_period}_スケジュール表.xlsx")
+                mrp_auto_link(out_io.getvalue(), site=factory_mode)
 
                 # =====================================================================
                 # 🌟 GEN製造オーダーインポート用CSVの生成

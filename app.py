@@ -403,7 +403,7 @@ output_end_date = st.sidebar.date_input(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 1. ファイルのアップロード")
-file_zai = st.sidebar.file_uploader("① 在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
+file_zai = st.sidebar.file_uploader("① 内製品の在庫推移リスト (Excel形式: .xlsx)", type=["xlsx"])
 
 if factory_mode == "本社":
     file_gekkan = st.sidebar.file_uploader("② 本社 月間製造計画書 (Excel形式: .xlsx)", type=["xlsx"])

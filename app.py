@@ -1001,7 +1001,7 @@ def get_capable_lines(vol, name, code, is_compost, f_mode):
     else:  # 関西工場
         if any(k in name_str for k in _KEYWORDS_4GO):
             return ['4号機']
-        if code_str in ('K0390110', 'K0480080', 'K0680190'):
+        if code_str in ('K0390110', 'K0480080', 'K0680190', 'K0300020'):
             return ['3号機']
         if code_str in ('K0270450', 'K0190010'):
             return ['その他']
@@ -1898,7 +1898,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
 
                             FIXED_CODES_SONOTA = ('K0270450', 'K0190010')
 
-                            if code in ('K0390110', 'K0480080', 'K0680190'):
+                            if code in ('K0390110', 'K0480080', 'K0680190', 'K0300020'):
                                 return '3号機'
                             if code in FIXED_CODES_SONOTA:
                                 return 'その他'
@@ -1972,6 +1972,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         # 固定コードを統一処理後に強制上書き（unify_recipe_linesによる上書きを防ぐ）
                         FIXED_LINE_KANSAI = {
                             'K0390110': '3号機', 'K0480080': '3号機', 'K0680190': '3号機',
+                            'K0300020': '3号機',
                             'K0270450': 'その他', 'K0190010': 'その他',
                             'K0430120': '4号機', 'K0630390': '5号機',
                         }

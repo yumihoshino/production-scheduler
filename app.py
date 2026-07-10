@@ -108,6 +108,89 @@ def parse_jisseki(df_j):
     return result
 
 # =====================================================================
+# 🌟 GitHub共有リポジトリ連携（MRPアプリと共通のsecrets設定を流用）
+#   Streamlit Cloudではローカルファイルが再起動・再デプロイで消えるため、
+#   休業日・計画停止など恒久保持したい設定はここ経由で保存する。
+# =====================================================================
+
+def fetch_github_file_bytes(path):
+    """MRPアプリ（発注リスケ提案ツール）と共有しているGitHubリポジトリからファイルを取得する。
+    st.secrets["github"]["token"]/["repo"] は mrp_link.py の自動連携と同じ設定を流用する。"""
+    gh = st.secrets.get("github", {})
+    token, repo = gh.get("token"), gh.get("repo")
+    if not token or not repo:
+        return None
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github.raw",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code == 200:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+def save_github_file_bytes(path, content, message):
+    """MRPアプリと共有しているGitHubリポジトリへファイルを保存（上書き）する。
+    mrp_link.pyの自動連携と同じContents API・同じsecrets設定を使う。"""
+    gh = st.secrets.get("github", {})
+    token, repo = gh.get("token"), gh.get("repo")
+    if not token or not repo:
+        return False
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        sha = None
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code == 200:
+            sha = r.json().get("sha")
+        payload = {"message": message, "content": base64.b64encode(content).decode("ascii")}
+        if sha:
+            payload["sha"] = sha
+        r = requests.put(url, headers=headers, json=payload, timeout=60)
+        return r.status_code in (200, 201)
+    except Exception:
+        return False
+
+def delete_github_file(path, message="旧ファイル削除（製造計画アプリから自動整理）"):
+    """共有リポジトリのファイルを削除する。ファイルが存在しない・失敗時はFalseを返す。"""
+    gh = st.secrets.get("github", {})
+    token, repo = gh.get("token"), gh.get("repo")
+    if not token or not repo:
+        return False
+    try:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        r = requests.get(url, headers=headers, timeout=30)
+        if r.status_code != 200:
+            return False
+        sha = r.json().get("sha")
+        r2 = requests.delete(url, headers=headers, json={"message": message, "sha": sha}, timeout=30)
+        return r2.status_code == 200
+    except Exception:
+        return False
+
+def _github_configured():
+    """GitHub保存の設定（token/repo）が有効かどうか。ローカル実行等で未設定ならFalse。"""
+    try:
+        gh = st.secrets.get("github", {})
+        return bool(gh.get("token")) and bool(gh.get("repo"))
+    except Exception:
+        return False
+
+# =====================================================================
 # 🌟 実績ライン学習辞書（品目コード→ライン）の永続化
 #   Streamlit Cloudではアプリ再起動（デプロイ・スリープ）でローカルCSVが
 #   消えるため、①累積マージで学習を蓄積、②辞書CSVをダウンロードして
@@ -153,24 +236,41 @@ def _save_line_dict(d, f_mode):
 # 起動時に選択中工場の学習辞書を復元
 _load_line_dict(factory_mode)
 
+GITHUB_HOLIDAYS_PATH = "data/scheduler_holidays.csv"
+
+def _parse_holidays_csv(src):
+    """休業日CSV（date列・YYYY-MM-DD）を日付リストに変換。読めなければNone。"""
+    try:
+        df_h = pd.read_csv(src, encoding='utf-8')
+        return [datetime.datetime.strptime(str(d), "%Y-%m-%d").date() for d in df_h['date'].tolist()]
+    except Exception:
+        return None
+
 def _load_holidays():
     if 'holidays_data' in st.session_state:
         return st.session_state['holidays_data']
-    if os.path.exists(HOLIDAYS_FILE):
-        try:
-            df_h = pd.read_csv(HOLIDAYS_FILE, encoding='utf-8')
-            dates = [datetime.datetime.strptime(d, "%Y-%m-%d").date() for d in df_h['date'].tolist()]
-            st.session_state['holidays_data'] = dates
-            return dates
-        except: pass
-    return []
+    dates = None
+    # 共有リポジトリ（GitHub）を最優先で参照（再起動・再デプロイ後も恒久保持）
+    raw = fetch_github_file_bytes(GITHUB_HOLIDAYS_PATH)
+    if raw is not None:
+        dates = _parse_holidays_csv(io.BytesIO(raw))
+    if dates is None and os.path.exists(HOLIDAYS_FILE):
+        dates = _parse_holidays_csv(HOLIDAYS_FILE)
+    if dates is None:
+        dates = []
+    st.session_state['holidays_data'] = dates
+    return dates
 
 def _save_holidays(dates):
     st.session_state['holidays_data'] = dates
+    csv_str = pd.DataFrame({'date': [d.strftime("%Y-%m-%d") for d in dates]}).to_csv(index=False)
     try:
-        df_h = pd.DataFrame({'date': [d.strftime("%Y-%m-%d") for d in dates]})
-        df_h.to_csv(HOLIDAYS_FILE, index=False, encoding='utf-8')
+        with open(HOLIDAYS_FILE, 'w', encoding='utf-8') as f:
+            f.write(csv_str)
     except: pass
+    if _github_configured():
+        if not save_github_file_bytes(GITHUB_HOLIDAYS_PATH, csv_str.encode('utf-8'), "工場休業日を更新（製造計画アプリ）"):
+            st.sidebar.warning("⚠️ 休業日のGitHub保存に失敗しました。アプリ再起動時に消える可能性があります。")
 
 _saved_holidays = _load_holidays()
 
@@ -230,7 +330,8 @@ for _week in _weeks:
                 _hol_set.discard(_d)
             else:
                 _hol_set.add(_d)
-            _save_holidays(sorted(_hol_set))
+            with st.spinner("☁️ 保存中..."):
+                _save_holidays(sorted(_hol_set))
             st.rerun()
 
 # 登録済み一覧と一括削除
@@ -239,7 +340,8 @@ if _saved_holidays:
     _list_str = "、".join(f"{d.month}/{d.day}({_w_kanji_list[d.weekday()]})" for d in sorted(_saved_holidays))
     st.sidebar.caption(f"📋 登録済み {len(_saved_holidays)}日: {_list_str}")
     if st.sidebar.button("🗑️ 全て削除", key="hol_clear"):
-        _save_holidays([])
+        with st.spinner("☁️ 保存中..."):
+            _save_holidays([])
         st.rerun()
 
 holidays_input = list(_saved_holidays)
@@ -251,36 +353,59 @@ holidays_input = list(_saved_holidays)
 #   停止分を差し引き、対象ジョブは既存の応援・後ろ倒しロジックに委ねる。
 # =====================================================================
 LINE_STOP_FILES = {"本社": "line_stops_honsha.csv", "関西工場": "line_stops_kansai.csv"}
+GITHUB_LINE_STOP_PATHS = {"本社": "data/scheduler_line_stops_honsha.csv", "関西工場": "data/scheduler_line_stops_kansai.csv"}
 
 def _stoppable_lines(f_mode):
     return ["1号機", "2号機", "3号機", "4号機", "5号機", "6号機"] if f_mode == "関西工場" else ["2号機", "3号機", "5号機", "6号機"]
+
+def _parse_line_stops_csv(src):
+    """計画停止CSV（line/date/start/end列）を行リストに変換。読めなければNone。"""
+    try:
+        df_s = pd.read_csv(src, encoding='utf-8')
+        rows = []
+        for _, r in df_s.iterrows():
+            rows.append({
+                'line': str(r['line']),
+                'date': datetime.datetime.strptime(str(r['date']), "%Y-%m-%d").date(),
+                'start': str(r['start']),
+                'end': str(r['end']),
+            })
+        return rows
+    except Exception:
+        return None
 
 def _load_line_stops(f_mode):
     key = f"line_stops_{f_mode}"
     if key in st.session_state:
         return st.session_state[key]
-    rows = []
-    p = LINE_STOP_FILES.get(f_mode)
-    if p and os.path.exists(p):
-        try:
-            df_s = pd.read_csv(p, encoding='utf-8')
-            for _, r in df_s.iterrows():
-                rows.append({
-                    'line': str(r['line']),
-                    'date': datetime.datetime.strptime(str(r['date']), "%Y-%m-%d").date(),
-                    'start': str(r['start']),
-                    'end': str(r['end']),
-                })
-        except: pass
+    rows = None
+    # 共有リポジトリ（GitHub）を最優先で参照（再起動・再デプロイ後も恒久保持）
+    gh_path = GITHUB_LINE_STOP_PATHS.get(f_mode)
+    if gh_path:
+        raw = fetch_github_file_bytes(gh_path)
+        if raw is not None:
+            rows = _parse_line_stops_csv(io.BytesIO(raw))
+    if rows is None:
+        p = LINE_STOP_FILES.get(f_mode)
+        if p and os.path.exists(p):
+            rows = _parse_line_stops_csv(p)
+    if rows is None:
+        rows = []
     st.session_state[key] = rows
     return rows
 
 def _save_line_stops(rows, f_mode):
     st.session_state[f"line_stops_{f_mode}"] = rows
+    csv_str = pd.DataFrame(
+        [{'line': r['line'], 'date': r['date'].strftime("%Y-%m-%d"), 'start': r['start'], 'end': r['end']} for r in rows],
+        columns=['line', 'date', 'start', 'end']).to_csv(index=False)
     try:
-        pd.DataFrame([{'line': r['line'], 'date': r['date'].strftime("%Y-%m-%d"), 'start': r['start'], 'end': r['end']} for r in rows]).to_csv(
-            LINE_STOP_FILES.get(f_mode), index=False, encoding='utf-8')
+        with open(LINE_STOP_FILES.get(f_mode), 'w', encoding='utf-8') as f:
+            f.write(csv_str)
     except: pass
+    if _github_configured():
+        if not save_github_file_bytes(GITHUB_LINE_STOP_PATHS.get(f_mode, ""), csv_str.encode('utf-8'), f"ライン計画停止（{f_mode}）を更新（製造計画アプリ）"):
+            st.sidebar.warning("⚠️ 計画停止のGitHub保存に失敗しました。アプリ再起動時に消える可能性があります。")
 
 _line_stops = _load_line_stops(factory_mode)
 
@@ -300,7 +425,8 @@ if st.sidebar.button("➕ この停止予定を登録", key="ls_add"):
         st.sidebar.error("終了時刻は開始時刻より後にしてください。")
     else:
         _line_stops.append({'line': _ls_line, 'date': _ls_date, 'start': _ls_start.strftime("%H:%M"), 'end': _ls_end.strftime("%H:%M")})
-        _save_line_stops(_line_stops, factory_mode)
+        with st.spinner("☁️ 保存中..."):
+            _save_line_stops(_line_stops, factory_mode)
         st.rerun()
 
 if _line_stops:
@@ -312,7 +438,8 @@ if _line_stops:
         _sc1.markdown(f"<div style='font-size:12px;padding-top:6px;'>{_lbl}</div>", unsafe_allow_html=True)
         if _sc2.button("🗑️", key=f"ls_del_{_si}"):
             _line_stops.remove(_s)
-            _save_line_stops(_line_stops, factory_mode)
+            with st.spinner("☁️ 保存中..."):
+                _save_line_stops(_line_stops, factory_mode)
             st.rerun()
 
 # 就業タイムテーブル（8:00始業、休憩10:00-10:10/12:00-13:00/15:00-15:10）を基準に、
@@ -461,75 +588,6 @@ st.sidebar.info(
 
 def safe_seek(f):
     if hasattr(f, 'seek'): f.seek(0)
-
-def fetch_github_file_bytes(path):
-    """MRPアプリ（発注リスケ提案ツール）と共有しているGitHubリポジトリからファイルを取得する。
-    st.secrets["github"]["token"]/["repo"] は mrp_link.py の自動連携と同じ設定を流用する。"""
-    gh = st.secrets.get("github", {})
-    token, repo = gh.get("token"), gh.get("repo")
-    if not token or not repo:
-        return None
-    try:
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github.raw",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        r = requests.get(url, headers=headers, timeout=30)
-        if r.status_code == 200:
-            return r.content
-    except Exception:
-        pass
-    return None
-
-def save_github_file_bytes(path, content, message):
-    """MRPアプリと共有しているGitHubリポジトリへファイルを保存（上書き）する。
-    mrp_link.pyの自動連携と同じContents API・同じsecrets設定を使う。"""
-    gh = st.secrets.get("github", {})
-    token, repo = gh.get("token"), gh.get("repo")
-    if not token or not repo:
-        return False
-    try:
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        sha = None
-        r = requests.get(url, headers=headers, timeout=30)
-        if r.status_code == 200:
-            sha = r.json().get("sha")
-        payload = {"message": message, "content": base64.b64encode(content).decode("ascii")}
-        if sha:
-            payload["sha"] = sha
-        r = requests.put(url, headers=headers, json=payload, timeout=60)
-        return r.status_code in (200, 201)
-    except Exception:
-        return False
-
-def delete_github_file(path, message="旧ファイル削除（製造計画アプリから自動整理）"):
-    """共有リポジトリのファイルを削除する。ファイルが存在しない・失敗時はFalseを返す。"""
-    gh = st.secrets.get("github", {})
-    token, repo = gh.get("token"), gh.get("repo")
-    if not token or not repo:
-        return False
-    try:
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        url = f"https://api.github.com/repos/{repo}/contents/{path}"
-        r = requests.get(url, headers=headers, timeout=30)
-        if r.status_code != 200:
-            return False
-        sha = r.json().get("sha")
-        r2 = requests.delete(url, headers=headers, json={"message": message, "sha": sha}, timeout=30)
-        return r2.status_code == 200
-    except Exception:
-        return False
 
 def read_item_master_bytes(raw_bytes, filename="ItemMaster.csv"):
     """品目マスタのバイト列をDataFrameに変換する。MRPアプリのloaders/item_master.pyと同じ

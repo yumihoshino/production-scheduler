@@ -2349,7 +2349,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         _cursor = _last_d + datetime.timedelta(days=1)
                     else:
                         _cursor = max(_cursor, _p_start)
-                    _summary.append((_m_num, _days_p, _ov_p, _p_end, _target_bd))
+                    _summary.append((_m_num, _days_p, _ov_p, _p_end, _target_bd, len(_dl_p) > 0))
 
                 df_final_sorted = pd.concat(_df_frames, ignore_index=True) if _df_frames else pd.DataFrame()
 
@@ -2457,11 +2457,14 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     st.stop()
 
                 # 月度別サマリー表示
-                for (_m_num, _days_p, _ov_p, _p_end, _tbd_p) in _summary:
+                for (_m_num, _days_p, _ov_p, _p_end, _tbd_p, _has_mat_delay) in _summary:
                     if _days_p == 0:
                         st.info(f"ℹ️ {_m_num}月度: 計画対象なし")
                     elif _days_p > _tbd_p:
-                        st.error(f"🚨 {_m_num}月度: 月内（{_p_end.strftime('%m/%d')}・{_tbd_p}営業日）に収まらず、【{_days_p}日間】かかり翌月度に食い込みます。残業しても月内に収まらない（資材待ち等）ため残業なしで計画しています。翌月度の計画開始はその分後ろ倒しになります。")
+                        # 資材不足による後ろ倒しが実際に発生した月のみ「資材待ち」と表示し、
+                        # それ以外は残り営業日数に対する物量超過であることを明示する
+                        _reason_p = "資材待ちによる後ろ倒しがあり" if _has_mat_delay else "残り営業日数に対して物量が多く"
+                        st.error(f"🚨 {_m_num}月度: 月内（{_p_end.strftime('%m/%d')}・{_tbd_p}営業日）に収まらず、【{_days_p}日間】かかり翌月度に食い込みます。{_reason_p}、残業（最大210分/日）を加えても月内に収まらないため残業なしで計画しています。翌月度の計画開始はその分後ろ倒しになります。")
                     elif _ov_p > 0:
                         st.warning(f"📢 {_m_num}月度: 月内（{_p_end.strftime('%m/%d')}まで）に収めるため毎日一律【{_ov_p}分】の残業が必要です（{_days_p}日間）。")
                     else:

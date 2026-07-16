@@ -2481,12 +2481,15 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 # 配合コードの照合結果チェック
                 # extract_content_codeはBOMで見つからない品目に品目コードをそのまま返すため、
                 # 「中身設計コード == 品目コード」の品目はBOM照合に失敗している
-                _unique_items_chk = df_final_sorted[['品目コード', '中身設計コード']].drop_duplicates(subset=['品目コード'])
+                _unique_items_chk = df_final_sorted[['品目コード', '品目名', '中身設計コード']].drop_duplicates(subset=['品目コード'])
                 _fallback_items = _unique_items_chk[_unique_items_chk['品目コード'].astype(str).str.strip() == _unique_items_chk['中身設計コード'].astype(str).str.strip()]
                 _n_items_chk, _n_fb = len(_unique_items_chk), len(_fallback_items)
                 if _n_items_chk > 0 and _n_fb > 0:
                     _fb_rate = _n_fb / _n_items_chk
-                    _fb_examples = "、".join(_fallback_items['品目コード'].astype(str).head(5))
+                    _fb_examples = "、".join(
+                        f"{_c}（{_n}）" if str(_n).strip() and str(_n) != 'nan' else str(_c)
+                        for _c, _n in zip(_fallback_items['品目コード'].astype(str).head(5), _fallback_items['品目名'].astype(str).head(5))
+                    )
                     if _fb_rate >= 0.5:
                         st.error(f"🚨 配合コードの照合に{_n_items_chk}品目中{_n_fb}品目が失敗し、品目コードをそのまま配合コードとして出力します（例: {_fb_examples}）。BOM構成表（読込元: {bom_source or '不明'}）が古い・工場違い・形式不一致の可能性があります。③に最新のBOM構成表マスタをアップロードして再生成してください。")
                     else:

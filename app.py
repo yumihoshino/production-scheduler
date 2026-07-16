@@ -5,6 +5,7 @@ import math
 import re
 import io
 from mrp_link import mrp_auto_link
+import gen_master_sync
 import os
 import copy
 import datetime
@@ -527,6 +528,11 @@ output_end_date = st.sidebar.date_input(
     min_value=start_date,
     help="計画自体は月度末・期末まで作成されますが、出力する指示書（日別・号機別製造計画／タイムテーブル、バッチ集計）はここで指定した日までの分に絞り込んで出力します。"
 )
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("## 🔗 GEN連携")
+if st.sidebar.button("GENから品目・取引先マスタを取得してGitHubへ保存"):
+    gen_master_sync.sync_gen_masters()
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 1. ファイルのアップロード")

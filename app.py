@@ -2493,6 +2493,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 _cursor = start_date
                 _summary = []
                 _delay_all = {}
+                _diag_sched = []  # 月別の投入残数・ジョブ数・製造袋数・所要日数（不具合切り分け用）
 
                 for _pi, (_m_num, _p_idx_d, _a_idx_d) in enumerate(month_col_pairs):
                     # この月度の計画残数をdf_m_distinctの月別列から取得
@@ -2529,6 +2530,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                     full_sched.extend(_sched_p)
                     if not _dfs_p.empty:
                         _df_frames.append(_dfs_p)
+                    # 診断: 投入した残数合計・生成ジョブ数・製造袋数・所要日数
+                    _diag_in_zan = float(pd.to_numeric(_df_mp['選択月_計画残数'], errors='coerce').fillna(0).clip(lower=0).sum())
+                    _diag_jobs = int(len(_dfs_p)) if _dfs_p is not None and not _dfs_p.empty else 0
+                    _diag_bags = int(_dfs_p['計画製造袋数'].sum()) if _dfs_p is not None and not _dfs_p.empty and '計画製造袋数' in _dfs_p.columns else 0
+                    _diag_sched.append((_m_num, _diag_in_zan, _diag_jobs, _diag_bags, _days_p, _p_start))
                     _day_offset += _days_p
                     if _sched_p:
                         _last_d = max(datetime.datetime.strptime(j['製造日'], "%Y/%m/%d").date() for j in _sched_p)
@@ -2641,6 +2647,13 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 if df_final_sorted.empty:
                     st.warning("計画対象となる品目がありません。")
                     st.stop()
+
+                # 🔍 月別スケジュール診断（投入残数→ジョブ数→製造袋数→所要日数の追跡）
+                if _diag_sched:
+                    with st.expander("🔍 月別スケジュール診断（残数→ジョブ→袋数→日数の追跡）"):
+                        st.caption("各月度で run_sim に投入した残数合計・生成ジョブ数・製造袋数・所要日数です。残数合計は大きいのに袋数・日数が極端に小さい月があれば、その月でスケジュール投入前に数量が失われています。")
+                        for (_dm, _din, _dj, _db, _dd, _dps) in _diag_sched:
+                            st.text(f"{_dm}月度: 投入残数合計={_din:,.0f}袋 → ジョブ数={_dj} / 製造袋数={_db:,.0f}袋 / 所要={_dd}日 (開始={_dps.strftime('%Y/%m/%d')})")
 
                 # 月度別サマリー表示
                 for (_m_num, _days_p, _ov_p, _p_end, _tbd_p, _has_mat_delay) in _summary:

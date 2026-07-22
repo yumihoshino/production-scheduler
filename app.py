@@ -783,6 +783,67 @@ def load_excel_sheets_merged(file, keywords, exclude_keywords=None):
     gc.collect()
     return base_df
 
+# 外部置き場 在庫推移リスト（⑧）はMRPアプリと共有する共有リポジトリへ部門（工場）別に保存し、
+# 次回アップロードで上書きされるまで両アプリで共通利用する。
+EXT_ZAI_SAVE_BASE = "data/外部置き場_在庫推移リスト"
+
+def _share_ext_zai_files(file_list, f_mode, notify=None, need_dfs=True):
+    """外部置き場 在庫推移リスト（⑧）をMRPアプリと共有する共有リポジトリへ部門（工場）別
+    ファイル名で保存（上書き）する。上書きされるまで保持される。同一内容の再保存は
+    セッションのダイジェストで抑止する。戻り値: 解析済みDFのリスト（need_dfs=Falseかつ
+    保存済みの場合は解析を省略して空リストを返す）。"""
+    if notify is None:
+        notify = st.sidebar
+    # まず生バイトのみ取得（Excel解析はコストが高いので必要時だけ実施する）
+    _raws = []
+    for _f_ext in file_list:
+        try:
+            safe_seek(_f_ext)
+            _raws.append(_f_ext.read())
+        except Exception as _e_ext:
+            notify.warning(f"⚠️ 外部置き場 在庫推移リスト（{getattr(_f_ext, 'name', '')}）の読込に失敗しました: {_e_ext}")
+    if not _raws:
+        return []
+    _ext_digest = hashlib.md5(b"".join(_raws)).hexdigest()
+    _already = st.session_state.get(f'ext_zai_saved_{f_mode}') == _ext_digest
+    if _already and not need_dfs:
+        return []  # 既に保存済みでDFも不要 → 解析を省略（再実行の負荷軽減）
+    # 解析（保存対象の検証・DF返却のため）
+    _df_ext_list, _ext_raw_ok = [], []
+    for _raw_e in _raws:
+        try:
+            _df_e = parse_ext_location_stock(io.BytesIO(_raw_e))
+            if _df_e is not None and not _df_e.empty:
+                _df_ext_list.append(_df_e)
+                _ext_raw_ok.append(_raw_e)
+        except Exception as _e_ext:
+            notify.warning(f"⚠️ 外部置き場 在庫推移リストの解析に失敗しました: {_e_ext}")
+    if _already:
+        return _df_ext_list  # 既に同一内容を保存済み（MRPアプリと共通利用中）
+    if not _ext_raw_ok:
+        return _df_ext_list
+    # 部門（工場）ごとに別ファイル名で保存し、他部門の保存分を消さないようにする
+    _n_saved = 0
+    for _i_e, _raw_e in enumerate(_ext_raw_ok, start=1):
+        if save_github_file_bytes(f"{EXT_ZAI_SAVE_BASE}_{f_mode}_{_i_e}.xlsx", _raw_e,
+                                  f"外部置き場在庫推移リスト連携（{f_mode}・製造計画アプリから自動保存）"):
+            _n_saved += 1
+    # 今回より多かった前回分の余剰ファイルを削除
+    for _i_e in range(len(_ext_raw_ok) + 1, len(_ext_raw_ok) + 11):
+        if not delete_github_file(f"{EXT_ZAI_SAVE_BASE}_{f_mode}_{_i_e}.xlsx"):
+            break
+    # 部門別に分ける前の旧ファイル（外部置き場_在庫推移リスト_1.xlsx等）が残っていると
+    # MRPアプリ側で二重計上になるため削除する
+    for _i_e in range(1, 11):
+        if not delete_github_file(f"{EXT_ZAI_SAVE_BASE}_{_i_e}.xlsx"):
+            break
+    if _n_saved:
+        st.session_state[f'ext_zai_saved_{f_mode}'] = _ext_digest
+        notify.success(f"📤 外部置き場 在庫推移リスト（{_n_saved}ファイル）を共有リポジトリへ保存しました。次回のアップロードで上書きされるまで、このアプリとMRPアプリの両方で自動的に使われます（MRPアプリ側は1〜2分後に反映）。")
+    else:
+        notify.warning("⚠️ 外部置き場 在庫推移リストの共有保存に失敗しました（今回の計算にはそのまま使用します）。")
+    return _df_ext_list
+
 def parse_stock_trend_file(file):
     """在庫推移リストと同形式（品目コード／種類[入・出・在]／日付列）のファイルから
     {(品目コード, 日付): 在庫数} を作る。原料・袋の在庫在庫連動ルール用。"""
@@ -1240,6 +1301,11 @@ if file_jisseki is not None:
                 _save_line_dict(_merged, factory_mode)
     except: pass
 
+# 外部置き場 在庫推移リスト（⑧）は、アップロードされた時点で共有リポジトリへ保存し、
+# スケジュール生成を待たずにMRPアプリと共有する（上書きされるまで保持）。
+if file_ext_zai:
+    _share_ext_zai_files(file_ext_zai, factory_mode, need_dfs=False)
+
 _cur_line_dict = _load_line_dict(factory_mode)
 if _cur_line_dict:
     st.sidebar.success(f"🟢 実績ライン学習（{factory_mode}）: {len(_cur_line_dict)}品目 保持中")
@@ -1554,45 +1620,11 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                                    '移動期限(計画開始日)', '移動元の利用可能在庫', '拠点の不足数(充当前)']
                 df_move_instr = pd.DataFrame(columns=MOVE_INSTR_COLS)
                 ext_summary_rows = []
-                EXT_ZAI_SAVE_BASE = "data/外部置き場_在庫推移リスト"
                 _df_ext_list = []
                 if file_ext_zai:
-                    # ⑧のアップロードを読み込み、MRPアプリと共通利用できるよう共有リポジトリへ自動保存（上書き）する
-                    _ext_raw_ok = []
-                    for _f_ext in file_ext_zai:
-                        try:
-                            safe_seek(_f_ext)
-                            _raw_e = _f_ext.read()
-                            _df_e = parse_ext_location_stock(io.BytesIO(_raw_e))
-                            if _df_e is not None and not _df_e.empty:
-                                _df_ext_list.append(_df_e)
-                                _ext_raw_ok.append(_raw_e)
-                        except Exception as _e_ext:
-                            st.warning(f"⚠️ 外部置き場 在庫推移リスト（{getattr(_f_ext, 'name', '')}）の読込に失敗しました: {_e_ext}")
-                    if _ext_raw_ok:
-                        _ext_digest = hashlib.md5(b"".join(_ext_raw_ok)).hexdigest()
-                        if st.session_state.get(f'ext_zai_saved_{factory_mode}') == _ext_digest:
-                            st.caption("✅ この外部置き場 在庫推移リストは保存済みです（MRPアプリと共通利用・次回アップロードで上書き）")
-                        else:
-                            # 部門（工場）ごとに別ファイル名で保存し、他部門の保存分を消さないようにする
-                            _n_saved = 0
-                            for _i_e, _raw_e in enumerate(_ext_raw_ok, start=1):
-                                if save_github_file_bytes(f"{EXT_ZAI_SAVE_BASE}_{factory_mode}_{_i_e}.xlsx", _raw_e,
-                                                          f"外部置き場在庫推移リスト連携（{factory_mode}・製造計画アプリから自動保存）"):
-                                    _n_saved += 1
-                            for _i_e in range(len(_ext_raw_ok) + 1, len(_ext_raw_ok) + 11):
-                                if not delete_github_file(f"{EXT_ZAI_SAVE_BASE}_{factory_mode}_{_i_e}.xlsx"):
-                                    break
-                            # 部門別に分ける前の旧ファイル（外部置き場_在庫推移リスト_1.xlsx等）が残っていると
-                            # MRPアプリ側で二重計上になるため削除する
-                            for _i_e in range(1, 11):
-                                if not delete_github_file(f"{EXT_ZAI_SAVE_BASE}_{_i_e}.xlsx"):
-                                    break
-                            if _n_saved:
-                                st.session_state[f'ext_zai_saved_{factory_mode}'] = _ext_digest
-                                st.success(f"📤 外部置き場 在庫推移リスト（{_n_saved}ファイル）を共有リポジトリへ保存しました。次回のアップロードで上書きされるまで、このアプリとMRPアプリの両方で自動的に使われます（MRPアプリ側は1〜2分後に反映）。")
-                            else:
-                                st.warning("⚠️ 外部置き場 在庫推移リストの共有保存に失敗しました（今回の計算にはそのまま使用します）。")
+                    # ⑧のアップロードをMRPアプリと共通利用できるよう共有リポジトリへ保存（上書き・部門別）し、
+                    # 解析済みの外部置き場在庫を取得する。サイドバーで保存済みなら再保存はスキップされる。
+                    _df_ext_list = _share_ext_zai_files(file_ext_zai, factory_mode, notify=st)
                 else:
                     # ⑧が未アップロードの場合は、前回保存した外部置き場在庫を共有リポジトリから自動読込する
                     # （部門別ファイルを優先し、無ければ部門別に分ける前の旧ファイルを読む）

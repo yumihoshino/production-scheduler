@@ -1876,6 +1876,31 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                 df_m_clean['選択月_計画残数'] = _total_zan.values
                 for _mz_num, _mz_series in _month_zan.items():
                     df_m_clean[f'残数_{_mz_num}'] = _mz_series.values
+
+                # 🔍 月別 予定・実績・残数の読み取り診断（列検出ズレの切り分け用）
+                #   「検出はできているが予定/実績の列がズレて残数が小さい」ケースを可視化する。
+                #   有効な品目コード行（数字を含み、他工場プレフィックスを除く）だけを合計する。
+                if plan_to_yearend and month_col_pairs:
+                    _excl_pfx = 'H' if factory_mode == '関西工場' else None
+                    def _is_valid_code_diag(c):
+                        c = str(c).strip()
+                        if c in ('nan', 'None', '') or not re.search(r'\d', c):
+                            return False
+                        return not (_excl_pfx and c.startswith(_excl_pfx))
+                    _diag_valid = df_m.iloc[:, code_col_idx].apply(_is_valid_code_diag)
+                    _diag_lines = []
+                    for (m_num, p_idx, a_idx) in month_col_pairs:
+                        _pp = pd.to_numeric(df_m.iloc[:, p_idx], errors='coerce').fillna(0)[_diag_valid]
+                        _aa = pd.to_numeric(df_m.iloc[:, a_idx], errors='coerce').fillna(0)[_diag_valid]
+                        _zz = (_pp - _aa).clip(lower=0)
+                        _diag_lines.append(
+                            f"{m_num}月度: 予定列={p_idx} / 実績列={a_idx} … "
+                            f"予定合計={_pp.sum():,.0f}  実績合計={_aa.sum():,.0f}  残数合計={_zz.sum():,.0f} 袋"
+                        )
+                    with st.expander("🔍 月別 予定・実績・残数の読み取り診断（計画書の数字と突き合わせ用）"):
+                        st.caption("各月度で読み取った予定・実績・残数の合計です。計画書の数字と大きく違う（例: 残数合計が実際の予定より極端に小さい）場合は、予定/実績の列検出がズレています。")
+                        for _dl in _diag_lines:
+                            st.text(_dl)
                 if plan_to_yearend:
                     _found_months = [m for m, _, _ in month_col_pairs]
                     _missing_months = [m for m in months_to_plan if m not in _found_months]

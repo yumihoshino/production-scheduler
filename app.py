@@ -198,9 +198,20 @@ def _github_configured():
 #   GitHubリポジトリに同梱すれば再起動後も恒久保持できる仕組みとする。
 # =====================================================================
 JISSEKI_DICT_FILES = {"本社": "jisseki_line_honsha.csv", "関西工場": "jisseki_line_kansai.csv"}
+# 製造実績レポート（学習ライン辞書）は部門（工場）別にGitHubへ恒久保存する。
+# Streamlit Cloudではローカルファイルが再起動・再デプロイで消えるため、
+# 休業日・計画停止と同様にdata/scheduler_*.csvへ保存して次回起動後も維持する。
+GITHUB_JISSEKI_DICT_PATHS = {
+    "本社": "data/scheduler_jisseki_line_honsha.csv",
+    "関西工場": "data/scheduler_jisseki_line_kansai.csv",
+}
+
+def _dict_df_to_map(dfd):
+    return dict(zip(dfd['品目コード'].astype(str).str.strip(),
+                    dfd['ライン'].astype(str).str.strip()))
 
 def _load_line_dict(f_mode):
-    """学習済みライン辞書を読み込む（セッション→保存CSV→旧形式rawの順）"""
+    """学習済みライン辞書を読み込む（セッション→ローカルCSV→GitHub保存分→旧形式rawの順）"""
     key = f"line_dict_{f_mode}"
     if key in st.session_state:
         return st.session_state[key]
@@ -210,10 +221,21 @@ def _load_line_dict(f_mode):
         for enc in ('utf-8', 'cp932'):
             try:
                 dfd = pd.read_csv(p, encoding=enc)
-                d = dict(zip(dfd['品目コード'].astype(str).str.strip(),
-                             dfd['ライン'].astype(str).str.strip()))
+                d = _dict_df_to_map(dfd)
                 break
             except: pass
+    if not d:
+        # ローカルが消えている場合はGitHubの部門別恒久保存分から復元する
+        gh_path = GITHUB_JISSEKI_DICT_PATHS.get(f_mode)
+        if gh_path:
+            raw = fetch_github_file_bytes(gh_path)
+            if raw:
+                for enc in ('utf-8', 'cp932'):
+                    try:
+                        dfd = pd.read_csv(io.BytesIO(raw), encoding=enc)
+                        d = _dict_df_to_map(dfd)
+                        break
+                    except: pass
     if not d:
         # 旧形式（生データCSV）からの移行
         _raw = _load_jisseki(f_mode)
@@ -227,15 +249,88 @@ def _load_line_dict(f_mode):
     return d
 
 def _save_line_dict(d, f_mode):
-    """学習辞書をセッションとCSVの両方へ保存"""
+    """学習辞書をセッション・ローカルCSV・GitHub（部門別）へ保存"""
     st.session_state[f"line_dict_{f_mode}"] = d
+    csv_bytes = pd.DataFrame({'品目コード': list(d.keys()),
+                              'ライン': list(d.values())}).to_csv(index=False).encode('utf-8')
     try:
-        pd.DataFrame({'品目コード': list(d.keys()), 'ライン': list(d.values())}).to_csv(
-            JISSEKI_DICT_FILES.get(f_mode), index=False, encoding='utf-8')
+        with open(JISSEKI_DICT_FILES.get(f_mode), 'wb') as _f:
+            _f.write(csv_bytes)
+    except: pass
+    # 部門（工場）別にGitHubへ恒久保存（他部門の保存分には影響しない）
+    gh_path = GITHUB_JISSEKI_DICT_PATHS.get(f_mode)
+    if gh_path and _github_configured():
+        save_github_file_bytes(gh_path, csv_bytes, f"製造実績ライン学習（{f_mode}）を更新（製造計画アプリ）")
+
+# =====================================================================
+# 🌟 構成表（BOM）マスタの部門（工場）別・恒久保存
+#   従来は bom_master_local.csv（工場共通・ローカルのみ）へ保存していたため、
+#   ①再起動で消える ②本社と関西工場でマスタが混ざる、という問題があった。
+#   休業日・計画停止と同様に、部門別のローカルCSV＋GitHubへ保存して恒久化する。
+# =====================================================================
+BOM_LOCAL_FILES = {"本社": "bom_master_honsha_local.csv", "関西工場": "bom_master_kansai_local.csv"}
+GITHUB_BOM_PATHS = {
+    "本社": "data/scheduler_bom_master_honsha.csv",
+    "関西工場": "data/scheduler_bom_master_kansai.csv",
+}
+_LEGACY_BOM_FILE = "bom_master_local.csv"  # 旧形式（工場共通）互換用
+
+def _bom_session_key(f_mode):
+    return f"bom_data_{f_mode}"
+
+def _save_bom_master(df_bom, f_mode):
+    """該当工場のBOM構成表をセッション・ローカルCSV・GitHub（部門別）へ保存"""
+    st.session_state[_bom_session_key(f_mode)] = df_bom
+    try:
+        csv_bytes = df_bom.to_csv(index=False).encode('utf-8')
+        with open(BOM_LOCAL_FILES.get(f_mode, _LEGACY_BOM_FILE), 'wb') as _f:
+            _f.write(csv_bytes)
+        gh_path = GITHUB_BOM_PATHS.get(f_mode)
+        if gh_path and _github_configured():
+            save_github_file_bytes(gh_path, csv_bytes, f"BOM構成表マスタ（{f_mode}）を更新（製造計画アプリ）")
     except: pass
 
-# 起動時に選択中工場の学習辞書を復元
+def _load_bom_master_saved(f_mode):
+    """保存済みBOM構成表を復元し (df, 読込元ラベル) を返す。無ければ (None, None)。
+    優先: セッション → 部門別ローカルCSV → 部門別GitHub → 旧共通ローカルCSV。
+    結果（見つからなかった事実も含む）はセッションにキャッシュし、再実行のたびに
+    GitHubへ問い合わせないようにする（休業日ローダーと同じ方針）。"""
+    key = _bom_session_key(f_mode)
+    if key in st.session_state:
+        return st.session_state[key], st.session_state.get(f'bom_source_{f_mode}', "セッション内キャッシュ（今回のセッションで読み込んだもの）")
+    if st.session_state.get(f'bom_checked_{f_mode}'):
+        return None, None  # 今セッションで確認済み・保存分なし
+    df, src = None, None
+    p = BOM_LOCAL_FILES.get(f_mode)
+    if p and os.path.exists(p):
+        for enc in ('utf-8', 'cp932'):
+            try:
+                df, src = pd.read_csv(p, encoding=enc), f"サーバー保存キャッシュ（{p}・過去のアップロード分）"; break
+            except: pass
+    if df is None:
+        gh_path = GITHUB_BOM_PATHS.get(f_mode)
+        if gh_path:
+            raw = fetch_github_file_bytes(gh_path)
+            if raw:
+                for enc in ('utf-8', 'cp932'):
+                    try:
+                        df, src = pd.read_csv(io.BytesIO(raw), encoding=enc), f"GitHub恒久保存（{f_mode}・{gh_path}）"; break
+                    except: pass
+    if df is None and os.path.exists(_LEGACY_BOM_FILE):
+        for enc in ('utf-8', 'cp932'):
+            try:
+                df, src = pd.read_csv(_LEGACY_BOM_FILE, encoding=enc), "サーバー保存キャッシュ（旧・工場共通ファイル）"; break
+            except: pass
+    if df is not None:
+        st.session_state[key] = df
+        st.session_state[f'bom_source_{f_mode}'] = src
+    else:
+        st.session_state[f'bom_checked_{f_mode}'] = True
+    return df, src
+
+# 起動時に選択中工場の学習辞書・構成表マスタを復元（部門別・GitHub恒久保存分を含む）
 _load_line_dict(factory_mode)
+_load_bom_master_saved(factory_mode)
 
 GITHUB_HOLIDAYS_PATH = "data/scheduler_holidays.csv"
 
@@ -1105,7 +1200,11 @@ def get_sp(line, vol, f_mode, item_code=''):
 # 🌟 マスタスタンバイ外側チェック
 # =====================================================================
 
-has_local_master = os.path.exists("bom_master_local.csv") or os.path.exists("bom_master.xlsx") or os.path.exists("bom_master.csv") or ('bom_data' in st.session_state) or (file_bom is not None)
+has_local_master = (
+    (_bom_session_key(factory_mode) in st.session_state)  # 起動時復元・GitHub保存分を含む（キャッシュ済み）
+    or os.path.exists("bom_master.xlsx") or os.path.exists("bom_master.csv")  # リポジトリ同梱
+    or (file_bom is not None)
+)
 
 has_master_in_gekkan = False
 if not has_local_master and file_gekkan is not None:
@@ -1133,9 +1232,12 @@ if file_jisseki is not None:
         _pfx = 'H' if factory_mode == "本社" else 'K'
         _new_dict = {k: v for k, v in _new_dict.items() if str(k).startswith(_pfx)}
         if _new_dict:
-            _merged = dict(_load_line_dict(factory_mode))
+            _existing = dict(_load_line_dict(factory_mode))
+            _merged = dict(_existing)
             _merged.update(_new_dict)
-            _save_line_dict(_merged, factory_mode)
+            # 実際に内容が変わった時だけ保存（再実行のたびにGitHubへ重複コミットしない）
+            if _merged != _existing:
+                _save_line_dict(_merged, factory_mode)
     except: pass
 
 _cur_line_dict = _load_line_dict(factory_mode)
@@ -1144,11 +1246,16 @@ if _cur_line_dict:
     # 恒久保存用のダウンロードボタン（リポジトリ同梱でアプリ再起動後も維持できる）
     _dict_csv = pd.DataFrame({'品目コード': list(_cur_line_dict.keys()),
                               'ライン': list(_cur_line_dict.values())}).to_csv(index=False).encode('utf-8')
+    _dict_help = (
+        "実績レポートをアップロードすると、この学習辞書は部門（工場）別に共有リポジトリ（GitHub）へ自動保存され、アプリ再起動後も維持されます。このCSVは手動バックアップ用です。"
+        if _github_configured() else
+        "アプリの再起動（コード更新・スリープ）でサーバー上の保存は消えます。このCSVをダウンロードし、GitHubリポジトリのschedule_app.pyと同じ場所に置いてデプロイすると、再起動後も学習内容が恒久的に保持されます。"
+    )
     st.sidebar.download_button(
         "💾 学習辞書CSVをダウンロード",
         _dict_csv,
         file_name=JISSEKI_DICT_FILES.get(factory_mode, "jisseki_line.csv"),
-        help="アプリの再起動（コード更新・スリープ）でサーバー上の保存は消えます。このCSVをダウンロードし、GitHubリポジトリのschedule_app.pyと同じ場所に置いてデプロイすると、再起動後も学習内容が恒久的に保持されます。"
+        help=_dict_help
     )
 else:
     st.sidebar.info("ℹ️ 製造実績レポート未登録（ルールベースで動作）")
@@ -1163,6 +1270,7 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
             try:
                 df_bom = None
                 bom_source = None
+                _bom_needs_save = False  # 新規に読み込んだ場合のみ部門別に恒久保存する
                 if file_bom is not None:
                     safe_seek(file_bom)
                     if file_bom.name.endswith('.csv'):
@@ -1172,20 +1280,19 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                             df_bom = pd.read_csv(file_bom, encoding='cp932')
                     else: df_bom = clean_bom_master(load_excel_sheets_merged(file_bom, ["マスタ", "BOM", "BomMaster", "ﾏｽﾀ"]))
                     bom_source = f"③アップロードファイル（{file_bom.name}）"
-                elif 'bom_data' in st.session_state:
-                    df_bom = st.session_state['bom_data']
-                    bom_source = st.session_state.get('bom_source', "セッション内キャッシュ（今回のセッションで読み込んだもの）")
-                elif os.path.exists("bom_master_local.csv"):
-                    try: df_bom = pd.read_csv("bom_master_local.csv", encoding='utf-8')
-                    except: df_bom = pd.read_csv("bom_master_local.csv", encoding='cp932')
-                    bom_source = "サーバー保存キャッシュ（bom_master_local.csv・過去のアップロード分）"
-                elif os.path.exists("bom_master.xlsx"):
-                    df_bom = clean_bom_master(pd.read_excel("bom_master.xlsx", header=None))
-                    bom_source = "リポジトリ同梱ファイル（bom_master.xlsx）"
-                elif os.path.exists("bom_master.csv"):
-                    try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
-                    except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
-                    bom_source = "リポジトリ同梱ファイル（bom_master.csv）"
+                    _bom_needs_save = True
+                else:
+                    # 部門（工場）別の保存分（セッション→ローカルCSV→GitHub→旧共通）を復元
+                    df_bom, bom_source = _load_bom_master_saved(factory_mode)
+                    if df_bom is None and os.path.exists("bom_master.xlsx"):
+                        df_bom = clean_bom_master(pd.read_excel("bom_master.xlsx", header=None))
+                        bom_source = "リポジトリ同梱ファイル（bom_master.xlsx）"
+                        _bom_needs_save = True
+                    elif df_bom is None and os.path.exists("bom_master.csv"):
+                        try: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='utf-8', header=None))
+                        except: df_bom = clean_bom_master(pd.read_csv("bom_master.csv", encoding='cp932', header=None))
+                        bom_source = "リポジトリ同梱ファイル（bom_master.csv）"
+                        _bom_needs_save = True
 
                 if df_bom is None and file_gekkan is not None:
                     try:
@@ -1195,14 +1302,17 @@ if st.sidebar.button("🚀 製造計画スケジュールを生成する"):
                         if m_sheets:
                             df_bom = clean_bom_master(pd.read_excel(xl_g, sheet_name=m_sheets[0], header=None))
                             bom_source = f"月間製造計画書内のマスタシート（{m_sheets[0]}）"
+                            _bom_needs_save = True
                     except: pass
 
                 if df_bom is not None:
-                    try:
-                        df_bom.to_csv("bom_master_local.csv", index=False, encoding='utf-8')
-                        st.session_state['bom_data'] = df_bom
-                        st.session_state['bom_source'] = bom_source
-                    except: pass
+                    st.session_state['bom_source'] = bom_source
+                    st.session_state[f'bom_source_{factory_mode}'] = bom_source
+                    # 新規に読み込んだ構成表マスタのみ、部門（工場）別にローカル＋GitHubへ恒久保存
+                    if _bom_needs_save:
+                        _save_bom_master(df_bom, factory_mode)
+                    else:
+                        st.session_state[_bom_session_key(factory_mode)] = df_bom
 
                 if df_bom is None:
                     st.error("エラー: 構成表マスタが見つかりません。")
